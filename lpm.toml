@@ -1,0 +1,47 @@
+schema_version = 1
+
+[project]
+package = "lilygo-ui-nes"
+version = "0.1.0"
+app_id = "cc.lilygo.ui.Nes"
+title = "NES"
+summary = "Play NES ROMs with touch controls"
+description = "A responsive NES emulator for LILYGO UI with ROM discovery, touch controls, audio, and portrait or landscape play."
+license = "MIT AND GPL-2.0-or-later"
+source_repo = "https://github.com/LILYGO-UI/lilygo-ui-nes"
+homepage = "https://github.com/LILYGO-UI/lilygo-ui-nes"
+categories = ["Games"]
+
+[[project.authors]]
+name = "lbuque"
+email = "110239031@qq.com"
+
+[project.assets]
+icon = "assets/app-icon.png"
+
+[[project.assets.screenshots]]
+path = "assets/previews/preview1.png"
+caption = "NES game screen with touch controls"
+
+[[project.permissions]]
+id = "filesystem"
+access = "read-write"
+scope = "app-data"
+reason = "Read NES ROMs and write battery saves"
+
+[project.compatibility]
+architectures = ["arm64"]
+min_appkit_version = "0.1.0"
+
+[project.launcher]
+order = 90
+
+[build]
+host_preset = "host-simulator"
+cross_preset = "cm0-cross-gles"
+package_dir = "dist"
+
+[deploy]
+host = "raspberrypi.local"
+user = "pi"
+port = 22

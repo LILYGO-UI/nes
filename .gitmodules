@@ -1,0 +1,6 @@
+[submodule "third_party/cm0-appkit"]
+	path = third_party/cm0-appkit
+	url = https://github.com/LILYGO-UI/cm0-appkit.git
+[submodule "third_party/fceumm"]
+	path = third_party/fceumm
+	url = https://github.com/libretro/libretro-fceumm.git

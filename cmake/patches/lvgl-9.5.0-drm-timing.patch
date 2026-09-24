@@ -1,0 +1,198 @@
+--- a/src/drivers/display/drm/lv_linux_drm_egl.c
++++ b/src/drivers/display/drm/lv_linux_drm_egl.c
+@@ -11,6 +11,8 @@
+ #if LV_USE_LINUX_DRM && LV_LINUX_DRM_USE_EGL
+ 
+ #include <fcntl.h>
++#include <errno.h>
++#include <stdio.h>
+ #include <string.h>
+ #include <xf86drmMode.h>
+ #include <stdlib.h>
+@@ -30,6 +32,7 @@
+ 
+ #include "../../../stdlib/lv_string.h"
+ #include "../../../display/lv_display.h"
++#include "../../../misc/lv_timer.h"
+ 
+ /**********************
+  *      TYPEDEFS
+@@ -61,6 +64,9 @@
+ static drm_fb_state_t * drm_fb_state_create(lv_drm_ctx_t * ctx, struct gbm_bo * bo);
+ static void drm_fb_state_destroy_cb(struct gbm_bo * bo, void * data);
+ static void drm_flip_cb(void * driver_data, bool vsync);
++static void drm_flip_impl(void * driver_data, bool vsync);
++static void drm_swap_timing_cb(void * driver_data, bool success, uint64_t elapsed_ns);
++static void drm_timing_timer_cb(lv_timer_t * timer);
+ 
+ static void * drm_create_window(void * driver_data, const lv_egl_native_window_properties_t * properties);
+ static void drm_destroy_window(void * driver_data, void * native_window);
+@@ -122,6 +128,8 @@
+         return LV_RESULT_INVALID;
+     }
+ 
++    if(ctx->timing.enabled) ctx->timing_timer = lv_timer_create(drm_timing_timer_cb, 1000, ctx);
++
+     /* Let the opengles texture driver handle the texture lifetime */
+     ctx->texture.is_texture_owner = true;
+     /*Initialize the draw buffers and texture*/
+@@ -161,6 +169,10 @@
+     lv_event_code_t code = lv_event_get_code(e);
+     lv_display_t * display = (lv_display_t *) lv_event_get_target(e);
+     lv_drm_ctx_t * ctx = lv_display_get_driver_data(display);
++    if(code == LV_EVENT_DELETE && ctx && ctx->timing_timer) {
++        lv_timer_delete(ctx->timing_timer);
++        ctx->timing_timer = NULL;
++    }
+     switch(code) {
+         case LV_EVENT_DELETE:
+             if(ctx) {
+@@ -339,10 +351,10 @@
+ static void drm_on_page_flip(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void * data)
+ {
+     LV_UNUSED(fd);
+-    LV_UNUSED(frame);
+-    LV_UNUSED(sec);
+-    LV_UNUSED(usec);
+     lv_drm_ctx_t * ctx = (lv_drm_ctx_t *) data;
++    if(ctx->timing.enabled) {
++        nes_drm_timing_complete(&ctx->timing, frame, sec, usec, nes_drm_now_ns());
++    }
+ 
+     if(ctx->gbm_bo_presented) {
+         gbm_surface_release_buffer(ctx->gbm_surface, ctx->gbm_bo_presented);
+@@ -413,8 +425,29 @@
+ static void drm_flip_cb(void * driver_data, bool vsync)
+ {
+     lv_drm_ctx_t * ctx = (lv_drm_ctx_t *) driver_data;
++    uint64_t started_ns = ctx->timing.enabled ? nes_drm_now_ns() : 0;
++    drm_flip_impl(driver_data, vsync);
++    if(ctx->timing.enabled) nes_drm_timing_flip(&ctx->timing, nes_drm_now_ns() - started_ns);
++}
++
++static void drm_swap_timing_cb(void * driver_data, bool success, uint64_t elapsed_ns)
++{
++    lv_drm_ctx_t * ctx = (lv_drm_ctx_t *) driver_data;
++    nes_drm_timing_swap(&ctx->timing, success, elapsed_ns);
++}
++
++static void drm_timing_timer_cb(lv_timer_t * timer)
++{
++    lv_drm_ctx_t * ctx = lv_timer_get_user_data(timer);
++    nes_drm_timing_report(&ctx->timing, nes_drm_now_ns());
++}
++
++static void drm_flip_impl(void * driver_data, bool vsync)
++{
++    lv_drm_ctx_t * ctx = (lv_drm_ctx_t *) driver_data;
+ 
+     if(ctx->gbm_bo_pending) {
++        nes_drm_timing_replace_pending(&ctx->timing);
+         gbm_surface_release_buffer(ctx->gbm_surface, ctx->gbm_bo_pending);
+     }
+     ctx->gbm_bo_pending = gbm_surface_lock_front_buffer(ctx->gbm_surface);
+@@ -458,7 +491,12 @@
+ 
+ 
+         uint32_t flip_flags = DRM_MODE_PAGE_FLIP_EVENT;
++        uint64_t started_ns = ctx->timing.enabled ? nes_drm_now_ns() : 0;
+         int status = drmModePageFlip(ctx->fd, ctx->drm_encoder->crtc_id, pending_fb->fb_id, flip_flags, ctx);
++        int saved_errno = status < 0 ? errno : 0;
++        if(ctx->timing.enabled) {
++            nes_drm_timing_submit(&ctx->timing, status == 0, saved_errno, nes_drm_now_ns() - started_ns);
++        }
+         if(status < 0) {
+             LV_LOG_ERROR("Failed to enqueue page flip: %d", status);
+             return;
+@@ -535,6 +573,24 @@
+         goto get_crtc_err;
+     }
+ 
++    const char * perf = getenv("NES_PERF");
++    if(perf && strcmp(perf, "1") == 0) {
++        uint64_t monotonic = 0;
++        int cap_status = drmGetCap(ctx->fd, DRM_CAP_TIMESTAMP_MONOTONIC, &monotonic);
++        nes_drm_timing_init(&ctx->timing, true, cap_status == 0 && monotonic == 1, nes_drm_now_ns());
++        const drmModeModeInfo * mode = ctx->drm_mode;
++        fprintf(stderr, "nes drm mode: device=%s connector=%u type=%u type_id=%u crtc=%u"
++                " mode=%s size=%ux%u clock_khz=%u htotal=%u vtotal=%u flags=0x%x vscan=%u"
++                " refresh_hz=%.6f timestamp_clock=%s\n", path, ctx->drm_connector->connector_id,
++                ctx->drm_connector->connector_type, ctx->drm_connector->connector_type_id,
++                ctx->drm_encoder->crtc_id, mode->name, mode->hdisplay, mode->vdisplay,
++                mode->clock, mode->htotal, mode->vtotal, mode->flags, mode->vscan,
++                nes_drm_mode_refresh_hz(mode->clock, mode->htotal, mode->vtotal,
++                                        (mode->flags & DRM_MODE_FLAG_INTERLACE) != 0,
++                                        (mode->flags & DRM_MODE_FLAG_DBLSCAN) != 0, mode->vscan),
++                cap_status != 0 ? "unknown" : (monotonic == 1 ? "monotonic" : "realtime"));
++    }
++
+     return LV_RESULT_OK;
+ 
+ get_crtc_err:
+@@ -610,6 +666,7 @@
+         .egl_platform = EGL_PLATFORM_GBM_KHR,
+         .select_config = drm_egl_select_config_cb,
+         .flip_cb = drm_flip_cb,
++        .swap_timing_cb = ctx->timing.enabled ? drm_swap_timing_cb : NULL,
+         .create_window_cb = drm_create_window,
+         .destroy_window_cb = drm_destroy_window,
+     };
+--- a/src/drivers/display/drm/lv_linux_drm_egl_private.h
++++ b/src/drivers/display/drm/lv_linux_drm_egl_private.h
+@@ -24,6 +24,7 @@
+ #include "../../opengles/lv_opengles_egl.h"
+ #include "../../opengles/lv_opengles_egl_private.h"
+ #include "lv_linux_drm.h"
++#include "drm_timing.h"
+ 
+ /*********************
+  *      DEFINES
+@@ -52,6 +53,8 @@
+     struct gbm_bo * gbm_bo_presented;
+ 
+     lv_linux_drm_select_mode_cb_t mode_select_cb;
++    nes_drm_timing_t timing;
++    lv_timer_t * timing_timer;
+     int fd;
+     bool crtc_isset;
+ } lv_drm_ctx_t;
+--- a/src/drivers/opengles/lv_opengles_egl.c
++++ b/src/drivers/opengles/lv_opengles_egl.c
+@@ -12,6 +12,7 @@
+ #if LV_USE_EGL
+ 
+ #include <dlfcn.h>
++#include "drm_timing.h"
+ 
+ #include <string.h>
+ #include "lv_opengles_debug.h"
+@@ -133,7 +134,12 @@
+ 
+ void lv_opengles_egl_update(lv_opengles_egl_t * ctx)
+ {
+-    eglSwapBuffers(ctx->egl_display, ctx->egl_surface);
++    uint64_t started_ns = ctx->interface.swap_timing_cb ? nes_drm_now_ns() : 0;
++    EGLBoolean swapped = eglSwapBuffers(ctx->egl_display, ctx->egl_surface);
++    if(ctx->interface.swap_timing_cb) {
++        ctx->interface.swap_timing_cb(ctx->interface.driver_data, swapped == EGL_TRUE,
++                                      nes_drm_now_ns() - started_ns);
++    }
+     ctx->interface.flip_cb(ctx->interface.driver_data, ctx->vsync);
+ }
+ 
+--- a/src/drivers/opengles/lv_opengles_egl_private.h
++++ b/src/drivers/opengles/lv_opengles_egl_private.h
+@@ -58,6 +58,7 @@
+ 
+ typedef void (*lv_egl_set_visible_t)(void * driver_data, bool v);
+ typedef void (*lv_egl_flip_t)(void * driver_data, bool vsync);
++typedef void (*lv_egl_swap_timing_t)(void * driver_data, bool success, uint64_t elapsed_ns);
+ typedef void (*lv_egl_native_state_deinit_t)(void ** driver_data);
+ typedef size_t (*lv_egl_select_config_t)(void * driver_data, const lv_egl_config_t * configs,
+                                          size_t config_count);
+@@ -70,6 +71,7 @@
+     lv_create_window_t create_window_cb;
+     lv_destroy_window_t destroy_window_cb;
+     lv_egl_flip_t flip_cb;
++    lv_egl_swap_timing_t swap_timing_cb;
+ };

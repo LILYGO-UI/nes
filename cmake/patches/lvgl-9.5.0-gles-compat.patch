@@ -1,0 +1,395 @@
+diff --git a/src/draw/opengles/lv_draw_opengles.c b/src/draw/opengles/lv_draw_opengles.c
+index 97a3dec..d1ec9de 100644
+--- a/src/draw/opengles/lv_draw_opengles.c
++++ b/src/draw/opengles/lv_draw_opengles.c
+@@ -119,6 +119,7 @@ void lv_draw_opengles_init(void)
+ 
+ void lv_draw_opengles_deinit(void)
+ {
++    if(!g_unit) return;
+     lv_free(g_unit->render_draw_buf.unaligned_data);
+     lv_cache_destroy(g_unit->texture_cache, g_unit);
+     if(g_unit->framebuffer != 0) {
+diff --git a/src/drivers/display/drm/lv_linux_drm_egl.c b/src/drivers/display/drm/lv_linux_drm_egl.c
+index 5462566..242f0fa 100644
+--- a/src/drivers/display/drm/lv_linux_drm_egl.c
++++ b/src/drivers/display/drm/lv_linux_drm_egl.c
+@@ -49,11 +49,11 @@ static uint32_t tick_cb(void);
+ static void flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map);
+ static void event_cb(lv_event_t * e);
+ 
+-static lv_result_t drm_device_init(lv_drm_ctx_t * ctx, const char * path);
++static lv_result_t drm_device_init(lv_drm_ctx_t * ctx, const char * path, int64_t connector_id);
+ static void drm_device_deinit(lv_drm_ctx_t * ctx);
+ 
+ static lv_egl_interface_t drm_get_egl_interface(lv_drm_ctx_t * ctx);
+-static drmModeConnector * drm_get_connector(lv_drm_ctx_t * ctx);
++static drmModeConnector * drm_get_connector(lv_drm_ctx_t * ctx, int64_t connector_id);
+ static drmModeModeInfo * drm_get_mode(lv_drm_ctx_t * ctx);
+ static drmModeEncoder * drm_get_encoder(lv_drm_ctx_t * ctx);
+ static drmModeCrtc * drm_get_crtc(lv_drm_ctx_t * ctx);
+@@ -89,6 +89,7 @@ lv_display_t * lv_linux_drm_create(void)
+         return NULL;
+     }
+ 
++    ctx->fd = -1;
+     ctx->display = lv_display_create(1, 1);
+ 
+     if(!ctx->display) {
+@@ -104,10 +105,9 @@ lv_display_t * lv_linux_drm_create(void)
+ 
+ lv_result_t lv_linux_drm_set_file(lv_display_t * display, const char * file, int64_t connector_id)
+ {
+-    LV_UNUSED(connector_id);
+     lv_drm_ctx_t * ctx = lv_display_get_driver_data(display);
+ 
+-    lv_result_t err = drm_device_init(ctx, file);
++    lv_result_t err = drm_device_init(ctx, file, connector_id);
+     if(err != LV_RESULT_OK) {
+         LV_LOG_ERROR("Failed to initialize DRM device");
+         return LV_RESULT_INVALID;
+@@ -138,7 +138,6 @@ lv_result_t lv_linux_drm_set_file(lv_display_t * display, const char * file, int
+     lv_display_set_render_mode(display, LV_USE_DRAW_NANOVG ? LV_DISPLAY_RENDER_MODE_FULL : LV_DISPLAY_RENDER_MODE_DIRECT);
+ 
+     lv_display_add_event_cb(ctx->display, event_cb, LV_EVENT_RESOLUTION_CHANGED, NULL);
+-    lv_display_add_event_cb(ctx->display, event_cb, LV_EVENT_DELETE, NULL);
+ 
+     return LV_RESULT_OK;
+ }
+@@ -165,9 +164,9 @@ static void event_cb(lv_event_t * e)
+     switch(code) {
+         case LV_EVENT_DELETE:
+             if(ctx) {
++                lv_opengles_texture_deinit(&ctx->texture);
+                 lv_opengles_egl_context_destroy(ctx->egl_ctx);
+                 ctx->egl_ctx = NULL;
+-                lv_opengles_texture_deinit(&ctx->texture);
+                 drm_device_deinit(ctx);
+                 lv_display_set_driver_data(display, NULL);
+             }
+@@ -269,19 +268,11 @@ static void flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * px_m
+ 
+ void drm_device_deinit(lv_drm_ctx_t * ctx)
+ {
++    drm_destroy_window(ctx, ctx->gbm_surface);
+     if(ctx->drm_crtc) {
+-        drmModeSetCrtc(ctx->fd,
+-                       ctx->drm_crtc->crtc_id,
+-                       ctx->drm_crtc->buffer_id,
+-                       ctx->drm_crtc->x,
+-                       ctx->drm_crtc->y,
+-                       &ctx->drm_connector->connector_id,
+-                       1,
+-                       &ctx->drm_crtc->mode);
+         drmModeFreeCrtc(ctx->drm_crtc);
+         ctx->drm_crtc = 0;
+     }
+-    drm_destroy_window(ctx, ctx->gbm_surface);
+ 
+     if(ctx->gbm_dev) {
+         gbm_device_destroy(ctx->gbm_dev);
+@@ -299,10 +290,10 @@ void drm_device_deinit(lv_drm_ctx_t * ctx)
+         drmModeFreeResources(ctx->drm_resources);
+         ctx->drm_resources = NULL;
+     }
+-    if(ctx->fd > 0) {
++    if(ctx->fd >= 0) {
+         drmClose(ctx->fd);
+     }
+-    ctx->fd = 0;
++    ctx->fd = -1;
+     ctx->drm_mode = NULL;
+     lv_free(ctx);
+ }
+@@ -484,7 +475,7 @@ static void drm_flip_cb(void * driver_data, bool vsync)
+     }
+ }
+ 
+-static lv_result_t drm_device_init(lv_drm_ctx_t * ctx, const char * path)
++static lv_result_t drm_device_init(lv_drm_ctx_t * ctx, const char * path, int64_t connector_id)
+ {
+     if(!path) {
+         LV_LOG_ERROR("Device path must not be NULL");
+@@ -509,7 +500,7 @@ static lv_result_t drm_device_init(lv_drm_ctx_t * ctx, const char * path)
+         goto get_resources_err;
+     }
+ 
+-    ctx->drm_connector = drm_get_connector(ctx);
++    ctx->drm_connector = drm_get_connector(ctx, connector_id);
+     if(!ctx->drm_connector) {
+         LV_LOG_ERROR("Failed to find a suitable connector");
+         goto get_connector_err;
+@@ -547,18 +538,17 @@ static lv_result_t drm_device_init(lv_drm_ctx_t * ctx, const char * path)
+     return LV_RESULT_OK;
+ 
+ get_crtc_err:
++set_master_err:
+     gbm_device_destroy(ctx->gbm_dev);
+     ctx->gbm_dev = NULL;
+-set_master_err:
+-    /* Nothing special to do */
+ gbm_create_device_err:
+     drmModeFreeEncoder(ctx->drm_encoder);
+     ctx->drm_encoder = NULL;
+ get_encoder_err:
++get_mode_err:
+     drmModeFreeConnector(ctx->drm_connector);
+     ctx->drm_connector = NULL;
+-get_mode_err:
+-    /* Nothing special to do */
++    ctx->drm_mode = NULL;
+ get_connector_err:
+     drmModeFreeResources(ctx->drm_resources);
+     ctx->drm_resources = NULL;
+@@ -566,7 +556,7 @@ get_resources_err:
+     /* Nothing special to do */
+ set_client_cap_err:
+     close(ctx->fd);
+-    ctx->fd = 0;
++    ctx->fd = -1;
+ open_err:
+     return LV_RESULT_INVALID;
+ }
+@@ -625,13 +615,15 @@ static lv_egl_interface_t drm_get_egl_interface(lv_drm_ctx_t * ctx)
+     };
+ }
+ 
+-static drmModeConnector * drm_get_connector(lv_drm_ctx_t * ctx)
++static drmModeConnector * drm_get_connector(lv_drm_ctx_t * ctx, int64_t connector_id)
+ {
+     drmModeConnector * connector = NULL;
+ 
+     LV_ASSERT_NULL(ctx->drm_resources);
+     for(int i = 0; i < ctx->drm_resources->count_connectors; i++) {
++        if(connector_id >= 0 && ctx->drm_resources->connectors[i] != connector_id) continue;
+         connector = drmModeGetConnector(ctx->fd, ctx->drm_resources->connectors[i]);
++        if(!connector) continue;
+         if(connector->connection == DRM_MODE_CONNECTED && connector->count_modes > 0) {
+             return connector;
+         }
+@@ -740,6 +732,19 @@ static void drm_destroy_window(void * driver_data, void * native_window)
+         return;
+     }
+ 
++    /* Restore scanout before releasing the buffers that KMS was using. */
++    if(ctx->crtc_isset && ctx->drm_crtc) {
++        if(ctx->gbm_bo_flipped) drm_do_page_flip(ctx, 1000);
++        drmModeCrtc * crtc = ctx->drm_crtc;
++        int status = drmModeSetCrtc(ctx->fd, crtc->crtc_id,
++                                   crtc->mode_valid ? crtc->buffer_id : 0, crtc->x, crtc->y,
++                                   crtc->mode_valid ? &ctx->drm_connector->connector_id : NULL,
++                                   crtc->mode_valid ? 1 : 0,
++                                   crtc->mode_valid ? &crtc->mode : NULL);
++        if(status < 0) LV_LOG_WARN("Failed to restore CRTC: %d", status);
++        ctx->crtc_isset = false;
++    }
++
+     if(ctx->gbm_bo_pending) {
+         gbm_surface_release_buffer(ctx->gbm_surface, ctx->gbm_bo_pending);
+         ctx->gbm_bo_pending = NULL;
+diff --git a/src/drivers/opengles/lv_opengles_driver.c b/src/drivers/opengles/lv_opengles_driver.c
+index 308edce..9827558 100644
+--- a/src/drivers/opengles/lv_opengles_driver.c
++++ b/src/drivers/opengles/lv_opengles_driver.c
+@@ -47,7 +47,7 @@ static void lv_opengles_vertex_array_deinit(void);
+ static void lv_opengles_vertex_array_bind(void);
+ static void lv_opengles_vertex_array_unbind(void);
+ static void lv_opengles_vertex_array_add_buffer(void);
+-static void lv_opengles_index_buffer_init(const unsigned int * data, unsigned int count);
++static void lv_opengles_index_buffer_init(const uint16_t * data, unsigned int count);
+ static void lv_opengles_index_buffer_deinit(void);
+ static unsigned int lv_opengles_index_buffer_get_count(void);
+ static void lv_opengles_index_buffer_bind(void);
+@@ -105,7 +105,7 @@ void lv_opengles_init(void)
+ 
+     lv_opengles_enable_blending(false);
+ 
+-    unsigned int indices[] = {
++    const uint16_t indices[] = {
+         0, 1, 2,
+         2, 3, 0
+     };
+@@ -457,6 +457,10 @@ static void lv_opengles_vertex_buffer_unbind(void)
+ 
+ static void lv_opengles_vertex_array_init(void)
+ {
++#if LV_USE_EGL
++    /* VAOs are optional in GLES 2.0. Rebind the attributes for each draw without them. */
++    if(!GLAD_GL_OES_vertex_array_object || !glGenVertexArrays || !glBindVertexArray || !glDeleteVertexArrays) return;
++#endif
+     if(vertex_array_id == 0) GL_CALL(glGenVertexArrays(1, &vertex_array_id));
+ }
+ 
+@@ -469,12 +473,12 @@ static void lv_opengles_vertex_array_deinit(void)
+ 
+ static void lv_opengles_vertex_array_bind(void)
+ {
+-    GL_CALL(glBindVertexArray(vertex_array_id));
++    if(vertex_array_id != 0) GL_CALL(glBindVertexArray(vertex_array_id));
+ }
+ 
+ static void lv_opengles_vertex_array_unbind(void)
+ {
+-    GL_CALL(glBindVertexArray(0));
++    if(vertex_array_id != 0) GL_CALL(glBindVertexArray(0));
+ }
+ 
+ static void lv_opengles_vertex_array_add_buffer(void)
+@@ -490,14 +494,14 @@ static void lv_opengles_vertex_array_add_buffer(void)
+     }
+ }
+ 
+-static void lv_opengles_index_buffer_init(const unsigned int * data, unsigned int count)
++static void lv_opengles_index_buffer_init(const uint16_t * data, unsigned int count)
+ {
+     index_buffer_count = count;
+     if(index_buffer_id == 0) GL_CALL(glGenBuffers(1, &index_buffer_id));
+ 
+     GL_CALL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer_id));
+ 
+-    GL_CALL(glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * sizeof(GLuint), data, GL_STATIC_DRAW));
++    GL_CALL(glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * sizeof(uint16_t), data, GL_STATIC_DRAW));
+ }
+ 
+ static void lv_opengles_index_buffer_deinit(void)
+@@ -566,6 +570,7 @@ static void lv_opengles_shader_deinit(void)
+     /* The program is part of the manager and as such will be destroyed inside */
+     lv_opengl_shader_manager_deinit(&shader_manager);
+     shader_id = 0;
++    lv_memzero(shader_location, sizeof(shader_location));
+ }
+ 
+ static void lv_opengles_shader_bind(void)
+@@ -639,9 +644,10 @@ static void lv_opengles_render_draw(void)
+     LV_PROFILER_DRAW_BEGIN;
+     lv_opengles_shader_bind();
+     lv_opengles_vertex_array_bind();
++    if(vertex_array_id == 0) lv_opengles_vertex_array_add_buffer();
+     lv_opengles_index_buffer_bind();
+     unsigned int count = lv_opengles_index_buffer_get_count();
+-    GL_CALL(glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT, NULL));
++    GL_CALL(glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_SHORT, NULL));
+     LV_PROFILER_DRAW_END;
+ }
+ 
+diff --git a/src/drivers/opengles/lv_opengles_egl.c b/src/drivers/opengles/lv_opengles_egl.c
+index 31c3355..d3d3c80 100644
+--- a/src/drivers/opengles/lv_opengles_egl.c
++++ b/src/drivers/opengles/lv_opengles_egl.c
+@@ -88,6 +88,10 @@ void lv_opengles_egl_context_destroy(lv_opengles_egl_t * ctx)
+         return;
+     }
+     if(ctx->egl_display) {
++        if(ctx->egl_context &&
++           eglMakeCurrent(ctx->egl_display, ctx->egl_surface, ctx->egl_surface, ctx->egl_context)) {
++            lv_opengles_deinit();
++        }
+         eglMakeCurrent(ctx->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+         if(ctx->egl_context) {
+             eglDestroyContext(ctx->egl_display, ctx->egl_context);
+@@ -99,13 +103,6 @@ void lv_opengles_egl_context_destroy(lv_opengles_egl_t * ctx)
+         ctx->egl_surface = EGL_NO_SURFACE;
+     }
+ 
+-    if(ctx->egl_lib_handle) {
+-        dlclose(ctx->egl_lib_handle);
+-    }
+-    if(ctx->opengl_lib_handle) {
+-        dlclose(ctx->opengl_lib_handle);
+-    }
+-
+     if(ctx->native_window && ctx->interface.destroy_window_cb) {
+         ctx->interface.destroy_window_cb(ctx->interface.driver_data, (void *)ctx->native_window);
+         ctx->native_window = 0;
+@@ -114,6 +111,12 @@ void lv_opengles_egl_context_destroy(lv_opengles_egl_t * ctx)
+         eglTerminate(ctx->egl_display);
+         ctx->egl_display = EGL_NO_DISPLAY;
+     }
++    if(ctx->opengl_lib_handle) {
++        dlclose(ctx->opengl_lib_handle);
++    }
++    if(ctx->egl_lib_handle) {
++        dlclose(ctx->egl_lib_handle);
++    }
+     ctx->egl_config = NULL;
+     lv_free(ctx);
+ }
+@@ -183,7 +186,7 @@ static lv_result_t load_egl(lv_opengles_egl_t * ctx)
+ 
+     if(eglBindAPI && !eglBindAPI(EGL_OPENGL_ES_API)) {
+         LV_LOG_ERROR("Failed to bind api");
+-        goto err;
++        goto opengl_lib_err;
+     }
+ 
+     ctx->opengl_lib_handle = load_gl_lib();
+@@ -234,13 +237,16 @@ static lv_result_t load_egl(lv_opengles_egl_t * ctx)
+ 
+ load_opengl_functions_err:
+     eglMakeCurrent(ctx->egl_display, NULL, NULL, NULL);
+-    eglDestroyContext(ctx->egl_display, ctx->egl_context);
+ egl_make_current_context_err:
++    eglDestroyContext(ctx->egl_display, ctx->egl_context);
+     ctx->egl_context = NULL;
+ egl_context_err:
++    eglDestroySurface(ctx->egl_display, ctx->egl_surface);
+     ctx->egl_surface = NULL;
+ egl_surface_err:
+-    ctx->interface.destroy_window_cb(ctx->interface.driver_data, (void *)ctx->native_window);
++    if(ctx->interface.destroy_window_cb) {
++        ctx->interface.destroy_window_cb(ctx->interface.driver_data, (void *)ctx->native_window);
++    }
+     ctx->native_window = 0;
+ create_window_err:
+     ctx->egl_config = NULL;
+@@ -248,8 +254,9 @@ egl_config_err:
+     dlclose(ctx->opengl_lib_handle);
+     ctx->opengl_lib_handle = NULL;
+ opengl_lib_err:
+-    ctx->egl_display = NULL;
+ load_egl_functions_err:
++    if(eglTerminate) eglTerminate(ctx->egl_display);
++    ctx->egl_display = NULL;
+ egl_display_err:
+     dlclose(ctx->egl_lib_handle);
+     ctx->egl_lib_handle = NULL;
+diff --git a/src/drivers/opengles/opengl_shader/lv_opengl_shader_manager.c b/src/drivers/opengles/opengl_shader/lv_opengl_shader_manager.c
+index f369d2e..6c13b73 100644
+--- a/src/drivers/opengles/opengl_shader/lv_opengl_shader_manager.c
++++ b/src/drivers/opengles/opengl_shader/lv_opengl_shader_manager.c
+@@ -525,6 +525,8 @@ static GLuint link_program(GLuint vertex_shader_id, GLuint fragment_shader_id)
+     GL_CALL(program_id = glCreateProgram());
+     GL_CALL(glAttachShader(program_id, fragment_shader_id));
+     GL_CALL(glAttachShader(program_id, vertex_shader_id));
++    GL_CALL(glBindAttribLocation(program_id, 0, "position"));
++    GL_CALL(glBindAttribLocation(program_id, 1, "texCoord"));
+     GL_CALL(glLinkProgram(program_id));
+ 
+     return program_id;
+diff --git a/src/lv_init.c b/src/lv_init.c
+index 2500559..f95340e 100644
+--- a/src/lv_init.c
++++ b/src/lv_init.c
+@@ -438,6 +438,11 @@ void lv_deinit(void)
+ 
+     lv_display_set_default(NULL);
+ 
++#if LV_USE_DRAW_OPENGLES
++    /* The display driver still owns the current GL context here. */
++    lv_draw_opengles_deinit();
++#endif
++
+     lv_cleanup_devices(LV_GLOBAL_DEFAULT());
+ 
+ #if LV_USE_EVDEV
+@@ -497,10 +502,6 @@ void lv_deinit(void)
+     lv_draw_dma2d_deinit();
+ #endif
+ 
+-#if LV_USE_DRAW_OPENGLES
+-    lv_draw_opengles_deinit();
+-#endif
+-
+ #if LV_USE_DRAW_SW
+     lv_draw_sw_deinit();
+ #endif
