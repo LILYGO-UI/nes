@@ -16,6 +16,14 @@ enum class NesButton : unsigned {
     b,
 };
 
+enum class NesStateOperation { save, load };
+
+struct NesStateResult {
+    NesStateOperation operation = NesStateOperation::save;
+    bool success = false;
+    std::string message;
+};
+
 class NesEmulator {
 public:
     static constexpr int frame_width  = 256;
@@ -32,6 +40,16 @@ public:
     bool start(const std::string &rom_path);
     void stop() noexcept;
     void set_button(NesButton button, bool pressed) noexcept;
+    // Turbo bindings (C/D) pulse the corresponding A/B input on alternating
+    // frames while held.  Only A and B are meaningful rapid buttons.
+    void set_rapid_button(NesButton button, bool pressed) noexcept;
+
+    // File I/O and core serialization run on the emulator worker at a frame
+    // boundary. Consume the previous result before requesting another action.
+    bool request_save_state(const std::string &path);
+    bool request_load_state(const std::string &path);
+    bool consume_state_result(NesStateResult &result);
+    [[nodiscard]] bool state_operation_pending() const noexcept;
 
     [[nodiscard]] bool running() const noexcept;
     bool consume_finished(int &result) noexcept;

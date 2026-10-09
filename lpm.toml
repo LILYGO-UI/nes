@@ -2,7 +2,7 @@ schema_version = 1
 
 [project]
 package = "lilygo-ui-nes"
-version = "0.1.0"
+version = "0.1.1"
 app_id = "cc.lilygo.ui.Nes"
 title = "NES"
 summary = "Play NES ROMs with touch controls"
@@ -21,7 +21,11 @@ icon = "assets/app-icon.png"
 
 [[project.assets.screenshots]]
 path = "assets/previews/preview1.png"
-caption = "NES game screen with touch controls"
+caption = "Portrait mode"
+
+[[project.assets.screenshots]]
+path = "assets/previews/preview2.png"
+caption = "Landscape mode"
 
 [[project.permissions]]
 id = "filesystem"

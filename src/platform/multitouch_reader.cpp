@@ -14,6 +14,26 @@
 #include <unistd.h>
 #endif
 
+TouchPoint MultitouchReader::map_point(int raw_x, int raw_y, bool active,
+                                       int raw_max_x, int raw_max_y,
+                                       int display_width, int display_height) noexcept
+{
+    TouchPoint point;
+    point.active = active && raw_x >= 0 && raw_y >= 0;
+    if (!point.active) return point;
+
+    if (display_width > display_height) {
+        // Match AppKit's LV_DISPLAY_ROTATION_90: calibrate to the native
+        // portrait panel, then apply the same inverse transform as LVGL input.
+        point.x = display_width - 1 - raw_y * (display_width - 1) / raw_max_y;
+        point.y = raw_x * (display_height - 1) / raw_max_x;
+    } else {
+        point.x = raw_x * (display_width - 1) / raw_max_x;
+        point.y = raw_y * (display_height - 1) / raw_max_y;
+    }
+    return point;
+}
+
 struct MultitouchReader::Impl {
     std::atomic<bool> running{false};
     std::atomic<int> display_width{568};
@@ -28,20 +48,8 @@ struct MultitouchReader::Impl {
 
     TouchPoint map(int raw_x, int raw_y, bool active) const noexcept
     {
-        TouchPoint point;
-        point.active = active && raw_x >= 0 && raw_y >= 0;
-        if (!point.active) return point;
-
-        const int width  = display_width.load();
-        const int height = display_height.load();
-        if (width > height) {
-            point.x = raw_y * (width - 1) / raw_max_y;
-            point.y = (raw_max_x - raw_x) * (height - 1) / raw_max_x;
-        } else {
-            point.x = raw_x * (width - 1) / raw_max_x;
-            point.y = raw_y * (height - 1) / raw_max_y;
-        }
-        return point;
+        return MultitouchReader::map_point(raw_x, raw_y, active, raw_max_x, raw_max_y,
+                                           display_width.load(), display_height.load());
     }
 
     void run(const std::string &path)

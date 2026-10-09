@@ -16,6 +16,7 @@
 #include <exception>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -48,6 +49,44 @@ std::atomic<bool> stop_requested{false};
 std::atomic<int> emulator_result{0};
 std::string active_rom_path;
 
+struct StateRequest {
+    NesStateOperation operation;
+    std::string path;
+};
+std::mutex state_mutex;
+std::optional<StateRequest> state_request;
+std::optional<NesStateResult> state_result;
+std::atomic<bool> state_pending{false};
+void reset_loaded_state_audio();
+
+bool request_state(NesStateOperation operation, const std::string &path)
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if (path.empty() || !emulator_running.load() || stop_requested.load() ||
+        state_pending.load() || state_result) return false;
+    state_request = StateRequest{operation, path};
+    state_pending.store(true);
+    return true;
+}
+
+bool take_state_request(NesStateOperation &operation, std::string &path)
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if (!state_request) return false;
+    operation = state_request->operation;
+    path = std::move(state_request->path);
+    state_request.reset();
+    return true;
+}
+
+void complete_state_request(NesStateResult result)
+{
+    if (result.operation == NesStateOperation::load && result.success) reset_loaded_state_audio();
+    std::lock_guard<std::mutex> lock(state_mutex);
+    state_result = std::move(result);
+    state_pending.store(false);
+}
+
 std::mutex frame_mutex;
 std::array<std::uint16_t, NesEmulator::frame_pixels> frame_a{};
 std::array<std::uint16_t, NesEmulator::frame_pixels> frame_b{};
@@ -57,6 +96,8 @@ std::uint32_t frame_sequence                                      = 0;
 std::uint32_t copied_sequence                                     = 0;
 
 std::atomic<std::uint32_t> pressed_mask{0};
+std::atomic<std::uint32_t> rapid_pressed_mask{0};
+std::atomic<unsigned> rapid_phase{0};
 
 std::mutex clock_mutex;
 std::condition_variable clock_wakeup;
@@ -334,6 +375,21 @@ void stop_frame_clock()
     clock_wakeup.notify_all();
 }
 
+void reset_loaded_state_audio()
+{
+#ifdef LILYGO_UI_NES_SDL_AUDIO
+    if (audio_device) {
+        SDL_PauseAudioDevice(audio_device, 1);
+        SDL_ClearQueuedAudio(audio_device);
+    }
+    audio_started = false;
+#else
+    audio_queue.reset();
+#endif
+    std::lock_guard<std::mutex> lock(clock_mutex);
+    if (clock_active) frame_deadline = std::chrono::steady_clock::now() + frame_period;
+}
+
 int install_frame_clock(double frequency)
 {
     if (!std::isfinite(frequency) || frequency <= 0 || frequency > 1000000000) return -1;
@@ -377,11 +433,21 @@ void emulator_thread_main()
         FceummHost host;
         host.sample_rate = kAudioRate;
         host.stop_requested = [] { return stop_requested.load(); };
-        host.buttons = [] { return pressed_mask.load(); };
+        host.buttons = [] {
+            const auto regular = pressed_mask.load();
+            const auto rapid   = rapid_pressed_mask.load();
+            // The core polls once per frame.  Alternating the rapid mask makes
+            // C/D behave like the native turbo A/B inputs while still allowing
+            // a regular A/B binding to remain continuously pressed.
+            const auto pulse = rapid && ((rapid_phase.fetch_xor(1U) & 1U) == 0) ? rapid : 0U;
+            return regular | pulse;
+        };
         host.wait_frame = wait_frame;
         host.set_frame_rate = [](double frequency) { install_frame_clock(frequency); };
         host.publish_frame = publish_frame;
         host.submit_audio = submit_audio_samples;
+        host.take_state_request = take_state_request;
+        host.state_completed = complete_state_request;
         result = run_fceumm(active_rom_path, host);
     } catch (const std::exception &error) {
         std::fprintf(stderr, "nes: emulator failed: %s\n", error.what());
@@ -389,7 +455,15 @@ void emulator_thread_main()
     close_audio();
     stop_frame_clock();
     emulator_result.store(result);
-    emulator_running.store(false);
+    {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        emulator_running.store(false);
+        if (state_request) {
+            state_result = NesStateResult{state_request->operation, false, "Game stopped before the state operation completed"};
+            state_request.reset();
+        }
+        state_pending.store(false);
+    }
     emulator_finished.store(true);
 }
 
@@ -415,9 +489,17 @@ bool NesEmulator::start(const std::string &rom_path)
     active_rom_path = rom_path;
     reset_frames();
     pressed_mask.store(0);
+    rapid_pressed_mask.store(0);
+    rapid_phase.store(0);
     stop_requested.store(false);
     emulator_finished.store(false);
     emulator_result.store(0);
+    {
+        std::lock_guard<std::mutex> state_lock(state_mutex);
+        state_request.reset();
+        state_result.reset();
+        state_pending.store(false);
+    }
     emulator_running.store(true);
     try {
         emulator_thread = std::thread(emulator_thread_main);
@@ -452,9 +534,49 @@ void NesEmulator::set_button(NesButton button, bool pressed) noexcept
     }
 }
 
+void NesEmulator::set_rapid_button(NesButton button, bool pressed) noexcept
+{
+    const auto bit = static_cast<unsigned>(button);
+    // Turbo is only defined for the NES A/B action buttons.  Rejecting other
+    // bits keeps accidental direction or system-button turbo from leaking to
+    // the core input mask.
+    if (button != NesButton::a && button != NesButton::b) return;
+    const std::uint32_t mask = 1U << bit;
+    if (pressed) {
+        const auto previous = rapid_pressed_mask.fetch_or(mask);
+        if (previous == 0) rapid_phase.store(0);
+    } else {
+        rapid_pressed_mask.fetch_and(~mask);
+    }
+}
+
 bool NesEmulator::running() const noexcept
 {
     return emulator_running.load();
+}
+
+bool NesEmulator::request_save_state(const std::string &path)
+{
+    return request_state(NesStateOperation::save, path);
+}
+
+bool NesEmulator::request_load_state(const std::string &path)
+{
+    return request_state(NesStateOperation::load, path);
+}
+
+bool NesEmulator::consume_state_result(NesStateResult &result)
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if (!state_result) return false;
+    result = std::move(*state_result);
+    state_result.reset();
+    return true;
+}
+
+bool NesEmulator::state_operation_pending() const noexcept
+{
+    return state_pending.load();
 }
 
 bool NesEmulator::consume_finished(int &result) noexcept

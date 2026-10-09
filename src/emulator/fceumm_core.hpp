@@ -6,6 +6,8 @@
 #include <functional>
 #include <string>
 
+#include "emulator/nes_emulator.hpp"
+
 struct FceummHost {
     int sample_rate = 48000;
     std::function<bool()> stop_requested;
@@ -15,6 +17,8 @@ struct FceummHost {
     std::function<void(double)> set_frame_rate;
     std::function<void(const std::uint16_t *, std::size_t)> publish_frame;
     std::function<void(const std::int16_t *, std::size_t)> submit_audio;
+    std::function<bool(NesStateOperation &, std::string &)> take_state_request;
+    std::function<void(NesStateResult)> state_completed;
 };
 
 // Runs on the emulator worker. Button bits use the NesButton enum order.

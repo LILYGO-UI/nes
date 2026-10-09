@@ -53,6 +53,12 @@ update. `lv_3dtexture` draws the texture at the current layout size using GPU
 nearest-neighbor sampling. The channel mapping accounts for LVGL's internal BGR
 display texture, and uploads preserve the GL unpack state.
 
+Landscape uses AppKit's `LV_DISPLAY_ROTATION_90`, matching Launcher. The
+`lvgl-9.5.0-gles-display-rotation.patch` removes an extra half-turn from LVGL's
+GLES quarter-turn presentation, so software DRM and GLES produce the same
+physical orientation. NES multitouch applies the same inverse coordinate
+transform as LVGL's pointer input.
+
 LVGL's OpenGL draw unit caches ordinary UI drawing as textures. Some UI elements
 still use software drawing when their cached textures are created. The frequently
 changing NES image bypasses that path entirely. Display rotation is handled by
@@ -87,7 +93,10 @@ sudo systemctl start lilygo-ui-launcher.service
 no game has started at this point. Running with sudo alone does not displace an
 existing DRM master. If the failure persists after stopping the launcher, inspect
 other holders with `sudo fuser -v /dev/dri/card0` before stopping another process.
-Use `sudo env NES_ROM_DIR=/path/to/roms ...` when a custom ROM directory is needed.
+The ROM library uses the launching process's `$HOME/nes/rom` only. When sudo sets
+`HOME=/root`, place ROMs in `/root/nes/rom` or use **Add ROM** in the library to import them.
+Manual save states and battery saves use `$HOME/nes/states` (`/root/nes/states`
+with that environment), shared by the software and GLES packages.
 
 Startup reports `[NES GPU] vendor=... renderer=... version=...` followed by
 `256x240 RGB565 texture; nearest-neighbor GPU scaling enabled`. A renderer such as
@@ -133,6 +142,7 @@ On macOS, provide a matching pair of ANGLE libraries with the Metal backend.
 On Linux, provide EGL/GLES libraries with a usable offscreen display. The test
 does not install or redistribute these host libraries. It checks color channels,
 image orientation, noninteger nearest-neighbor scaling, successive frame updates,
+physical scanout at 0/90/180/270 degrees,
 GL unpack-state restoration and repeated texture/display creation and deletion.
 PPM images are saved for visual inspection. This does not exercise a real DRM
 connector, device touch input or the board's Mesa driver.

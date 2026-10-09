@@ -1,0 +1,37 @@
+--- a/src/drivers/opengles/lv_opengles_driver.c
++++ b/src/drivers/opengles/lv_opengles_driver.c
+@@ -679,10 +679,10 @@
+                                    lv_display_rotation_t rotation, bool * h_flip, bool * v_flip, float clip_x1, float clip_y1, float clip_x2,
+                                    float clip_y2)
+ {
+-#if !LV_USE_DRAW_OPENGLES
+     LV_UNUSED(h_flip);
+     LV_UNUSED(v_flip);
+-#endif
++    /* Match software scanout and lv_display_rotate_point: quarter turns
++     * must not add an extra 180-degree flip for OpenGL draw textures. */
+     switch(rotation) {
+         case LV_DISPLAY_ROTATION_0:
+             vertex_buffer[0] = -1.f;
+@@ -704,10 +704,6 @@
+             break;
+ 
+         case LV_DISPLAY_ROTATION_270:
+-#if LV_USE_DRAW_OPENGLES
+-            *h_flip = !*h_flip;
+-            *v_flip = !*v_flip;
+-#endif
+             vertex_buffer[0] = 1.0f;
+             vertex_buffer[1] = 1.0f;
+             vertex_buffer[2] = clip_x1;
+@@ -745,10 +741,6 @@
+             vertex_buffer[15] = clip_y1;
+             break;
+         case LV_DISPLAY_ROTATION_90:
+-#if LV_USE_DRAW_OPENGLES
+-            *h_flip = !*h_flip;
+-            *v_flip = !*v_flip;
+-#endif
+             vertex_buffer[0] = -1.f;
+             vertex_buffer[1] = -1.0f;
+             vertex_buffer[2] = clip_x1;

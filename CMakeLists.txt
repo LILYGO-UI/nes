@@ -7,7 +7,7 @@ include(GNUInstallDirs)
 include(CTest)
 option(LILYGO_NES_GLES "Render NES frames as native OpenGL ES textures" OFF)
 option(LILYGO_NES_GLES_TEST "Build the offscreen GLES pixel tests" OFF)
-option(LILYGO_NES_LVGL_MONITOR "Show LVGL performance and memory monitors on screen" ON)
+option(LILYGO_NES_LVGL_MONITOR "Show LVGL performance and memory monitors on screen" OFF)
 if(LILYGO_NES_GLES_TEST AND NOT LILYGO_NES_GLES)
     message(FATAL_ERROR "LILYGO_NES_GLES_TEST requires LILYGO_NES_GLES")
 endif()
@@ -45,8 +45,10 @@ configure_file(
 include(cmake/Fceumm.cmake)
 
 add_library(lilygo_ui_nes_core STATIC
+    src/domain/nes_paths.cpp
     src/domain/rom_library.cpp
     src/emulator/nes_emulator.cpp
+    src/emulator/nes_input_mapping.cpp
     src/emulator/nes_performance.cpp
     src/emulator/fceumm_core.cpp)
 target_include_directories(lilygo_ui_nes_core PUBLIC
@@ -64,12 +66,26 @@ if(UNIX)
     target_link_libraries(lilygo_ui_nes_core PUBLIC m)
 endif()
 
+add_library(lilygo_ui_nes_view_models STATIC
+    src/pages/nes/nes_view_model.cpp
+    src/pages/library/library_view_model.cpp
+    src/pages/rom_browser/rom_browser_view_model.cpp
+    src/pages/game/game_view_model.cpp
+    src/pages/settings/settings_view_model.cpp
+    src/pages/help/help_view_model.cpp)
+target_compile_options(lilygo_ui_nes_view_models PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(lilygo_ui_nes_view_models PUBLIC lilygo_ui_nes_core)
+
 add_library(lilygo_ui_nes_ui STATIC
     src/app.cpp
     src/components/components.cpp
     src/pages/nes/frame_scaler.cpp
     src/pages/nes/nes_view.cpp
-    src/pages/nes/nes_view_model.cpp
+    src/pages/library/library_view.cpp
+    src/pages/rom_browser/rom_browser_view.cpp
+    src/pages/game/game_view.cpp
+    src/pages/settings/settings_view.cpp
+    src/pages/help/help_view.cpp
     src/platform/multitouch_reader.cpp)
 target_include_directories(lilygo_ui_nes_ui PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -77,7 +93,7 @@ target_include_directories(lilygo_ui_nes_ui PUBLIC
 target_compile_options(lilygo_ui_nes_ui PRIVATE
     -Wall -Wextra -Wpedantic)
 target_link_libraries(lilygo_ui_nes_ui PUBLIC
-    lilygo_ui_nes_core
+    lilygo_ui_nes_view_models
     LilyGoUI::Runtime)
 if(LILYGO_NES_GLES)
     target_sources(lilygo_ui_nes_ui PRIVATE src/platform/nes_gpu_frame.cpp)
@@ -134,6 +150,13 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING AND NOT LILYGO_NES_GLES_TEST)
         lilygo_ui_nes_core)
     add_test(NAME nes-core COMMAND nes-core-tests)
 
+    add_executable(nes-input-mapping-tests tests/test_input_mapping.cpp)
+    target_compile_options(nes-input-mapping-tests PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_libraries(nes-input-mapping-tests PRIVATE
+        lilygo_ui_nes_core)
+    add_test(NAME nes-input-mapping COMMAND nes-input-mapping-tests)
+
     add_executable(nes-fceumm-tests tests/test_fceumm.cpp)
     target_compile_options(nes-fceumm-tests PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
     target_link_libraries(nes-fceumm-tests PRIVATE lilygo_ui_nes_core)
@@ -180,6 +203,7 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING AND NOT LILYGO_NES_GLES_TEST)
 
     add_executable(nes-device-audio-tests
         tests/test_device_audio.cpp
+        src/domain/nes_paths.cpp
         src/emulator/nes_emulator.cpp
         src/emulator/nes_performance.cpp
         src/emulator/fceumm_core.cpp)
@@ -194,7 +218,7 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING AND NOT LILYGO_NES_GLES_TEST)
     target_compile_options(nes-view-model-tests PRIVATE
         -Wall -Wextra -Wpedantic -UNDEBUG)
     target_link_libraries(nes-view-model-tests PRIVATE
-        lilygo_ui_nes_ui)
+        lilygo_ui_nes_view_models)
     add_test(NAME nes-view-model COMMAND nes-view-model-tests)
 
     add_executable(nes-render-ui tests/render_ui.cpp)

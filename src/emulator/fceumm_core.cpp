@@ -1,5 +1,6 @@
 #include "emulator/fceumm_core.hpp"
 
+#include "domain/nes_paths.hpp"
 #include "emulator/nes_emulator.hpp"
 #include "emulator/nes_performance.hpp"
 
@@ -16,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -24,6 +26,9 @@
 namespace {
 
 constexpr std::uintmax_t kMaxRomBytes = 64U * 1024U * 1024U;
+constexpr std::size_t kMaxStateBytes = 4U * 1024U * 1024U;
+constexpr std::size_t kStateHeaderBytes = 32;
+constexpr std::array<std::uint8_t, 8> kStateMagic{'L', 'N', 'E', 'S', 'S', 'T', 'A', 'T'};
 constexpr unsigned kGetTargetSampleRate = 81 | RETRO_ENVIRONMENT_EXPERIMENTAL;
 std::mutex core_mutex;
 
@@ -34,6 +39,8 @@ struct Session {
     const FceummHost &host;
     std::unordered_map<std::string, std::string> options;
     std::string directory;
+    std::string save_directory;
+    std::uint64_t rom_fingerprint = 0;
     std::array<std::uint16_t, NesEmulator::frame_pixels> frame{};
     std::array<std::int16_t, 4096> audio{};
     std::uint32_t buttons = 0;
@@ -126,9 +133,11 @@ bool environment(unsigned command, void *data)
             static_cast<retro_log_callback *>(data)->log = core_log;
             return true;
         case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
-        case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
             *static_cast<const char **>(data) = session->directory.c_str();
             return true;
+        case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
+            *static_cast<const char **>(data) = session->save_directory.empty() ? nullptr : session->save_directory.c_str();
+            return !session->save_directory.empty();
         case kGetTargetSampleRate:
             *static_cast<unsigned *>(data) = static_cast<unsigned>(session->host.sample_rate);
             return true;
@@ -232,12 +241,12 @@ bool load_battery(const std::filesystem::path &path, void *memory, std::size_t s
     return false;
 }
 
-bool save_battery(const std::filesystem::path &path, const void *memory, std::size_t size)
+bool atomic_write(const std::filesystem::path &path, const void *memory, std::size_t size)
 {
-    std::string temporary = path.string() + ".tmp.XXXXXX";
+    std::string temporary = (path.parent_path() / ".nes.tmp.XXXXXX").string();
     const int descriptor = mkstemp(temporary.data());
     if (descriptor < 0) {
-        std::fprintf(stderr, "fceumm: cannot create battery RAM file %s: %s\n", path.c_str(), std::strerror(errno));
+        std::fprintf(stderr, "fceumm: cannot create save file %s: %s\n", path.c_str(), std::strerror(errno));
         return false;
     }
     bool written = false;
@@ -250,9 +259,158 @@ bool save_battery(const std::filesystem::path &path, const void *memory, std::si
         close(descriptor);
     }
     if (written && std::rename(temporary.c_str(), path.c_str()) == 0) return true;
-    std::fprintf(stderr, "fceumm: cannot save battery RAM %s: %s\n", path.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "fceumm: cannot save file %s: %s\n", path.c_str(), std::strerror(errno));
     std::remove(temporary.c_str());
     return false;
+}
+
+std::uint32_t read_u32(const std::uint8_t *bytes)
+{
+    return std::uint32_t{bytes[0]} | (std::uint32_t{bytes[1]} << 8U) |
+           (std::uint32_t{bytes[2]} << 16U) | (std::uint32_t{bytes[3]} << 24U);
+}
+
+void write_u32(std::uint8_t *bytes, std::uint32_t value)
+{
+    for (unsigned index = 0; index < 4; ++index) bytes[index] = static_cast<std::uint8_t>(value >> (index * 8U));
+}
+
+std::uint32_t checksum(const std::uint8_t *bytes, std::size_t size)
+{
+    std::uint32_t crc = 0xffffffffU;
+    for (std::size_t index = 0; index < size; ++index) {
+        crc ^= bytes[index];
+        for (unsigned bit = 0; bit < 8; ++bit) crc = (crc >> 1U) ^ (0xedb88320U & (0U - (crc & 1U)));
+    }
+    return ~crc;
+}
+
+std::uint64_t fingerprint_rom(std::ifstream &file)
+{
+    file.clear();
+    file.seekg(0);
+    std::array<char, 8192> bytes{};
+    std::uint64_t hash = 14695981039346656037ULL;
+    while (file.read(bytes.data(), bytes.size()) || file.gcount()) {
+        for (std::streamsize index = 0; index < file.gcount(); ++index) {
+            hash ^= static_cast<std::uint8_t>(bytes[static_cast<std::size_t>(index)]);
+            hash *= 1099511628211ULL;
+        }
+    }
+    if (!file.eof()) throw std::runtime_error("could not read ROM fingerprint");
+    return hash;
+}
+
+// Reject truncated or oversized inner chunks before the core can partially
+// overwrite its running state. The six chunks are emitted by FCEUmm itself.
+bool valid_state_payload(const std::uint8_t *bytes, std::size_t size)
+{
+    if (size < 16 || std::memcmp(bytes, "FCS\xff", 4) != 0 || read_u32(bytes + 4) != size - 16) return false;
+    unsigned seen = 0;
+    for (std::size_t offset = 16; offset < size;) {
+        if (size - offset < 5) return false;
+        const auto type = bytes[offset];
+        const auto length = read_u32(bytes + offset + 1);
+        offset += 5;
+        if (length > size - offset) return false;
+        const auto end = offset + length;
+        const unsigned bit = type >= 1 && type <= 5 ? 1U << (type - 1U) : type == 0x10 ? 32U : 0U;
+        if (bit) {
+            if (seen & bit) return false;
+            seen |= bit;
+            while (offset < end) {
+                if (end - offset < 8) return false;
+                const auto field_size = read_u32(bytes + offset + 4);
+                offset += 8;
+                if (field_size > end - offset) return false;
+                offset += field_size;
+            }
+        }
+        offset = end;
+    }
+    return seen == 63;
+}
+
+bool capture_state(std::vector<std::uint8_t> &bytes)
+{
+    const auto size = retro_serialize_size();
+    if (size < 16 || size > kMaxStateBytes) return false;
+    bytes.resize(size);
+    return retro_serialize(bytes.data(), bytes.size()) && valid_state_payload(bytes.data(), bytes.size());
+}
+
+NesStateResult save_state(const std::string &path, std::uint64_t fingerprint)
+{
+    std::vector<std::uint8_t> payload;
+    if (!capture_state(payload)) return {NesStateOperation::save, false, "Could not capture game state"};
+    std::vector<std::uint8_t> file(kStateHeaderBytes + payload.size(), 0);
+    std::copy(kStateMagic.begin(), kStateMagic.end(), file.begin());
+    write_u32(file.data() + 8, 1);
+    write_u32(file.data() + 12, static_cast<std::uint32_t>(payload.size()));
+    write_u32(file.data() + 16, static_cast<std::uint32_t>(fingerprint));
+    write_u32(file.data() + 20, static_cast<std::uint32_t>(fingerprint >> 32U));
+    write_u32(file.data() + 24, checksum(payload.data(), payload.size()));
+    std::copy(payload.begin(), payload.end(), file.begin() + kStateHeaderBytes);
+    std::error_code error;
+    const auto parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, error);
+    if (error || !atomic_write(path, file.data(), file.size())) {
+        return {NesStateOperation::save, false, "Could not write save state"};
+    }
+    return {NesStateOperation::save, true, "State saved"};
+}
+
+NesStateResult load_state(const std::string &path, std::uint64_t fingerprint)
+{
+    const auto failure = [](const char *message) { return NesStateResult{NesStateOperation::load, false, message}; };
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error) return failure(error == std::errc::no_such_file_or_directory ? "No saved state" : "Could not read save state");
+    if (size < kStateHeaderBytes + 16 || size > kStateHeaderBytes + kMaxStateBytes) return failure("Invalid save state");
+    std::vector<std::uint8_t> file(static_cast<std::size_t>(size));
+    std::ifstream input(path, std::ios::binary);
+    if (!input.read(reinterpret_cast<char *>(file.data()), static_cast<std::streamsize>(size)) || input.peek() != EOF) {
+        return failure("Could not read save state");
+    }
+    if (!std::equal(kStateMagic.begin(), kStateMagic.end(), file.begin()) || read_u32(file.data() + 8) != 1 ||
+        read_u32(file.data() + 12) != size - kStateHeaderBytes || read_u32(file.data() + 28) != 0) {
+        return failure("Invalid save state");
+    }
+    const auto saved_fingerprint = std::uint64_t{read_u32(file.data() + 16)} |
+                                   (std::uint64_t{read_u32(file.data() + 20)} << 32U);
+    if (saved_fingerprint != fingerprint) return failure("Save state belongs to a different ROM");
+    const auto *payload = file.data() + kStateHeaderBytes;
+    const auto payload_size = file.size() - kStateHeaderBytes;
+    if (checksum(payload, payload_size) != read_u32(file.data() + 24) || !valid_state_payload(payload, payload_size)) {
+        return failure("Invalid save state");
+    }
+    std::vector<std::uint8_t> backup;
+    if (!capture_state(backup)) return failure("Could not back up running game");
+    if (payload_size > backup.size() * 4) return failure("Incompatible save state");
+    if (!retro_unserialize(payload, payload_size)) {
+        if (!retro_unserialize(backup.data(), backup.size())) {
+            std::fprintf(stderr, "fceumm: could not restore backup after a failed state load\n");
+            return failure("State load and recovery failed");
+        }
+        return failure("Could not load save state");
+    }
+    return {NesStateOperation::load, true, "State loaded"};
+}
+
+void process_state_request(Session &state)
+{
+    if (!state.host.take_state_request || !state.host.state_completed) return;
+    NesStateOperation operation;
+    std::string path;
+    if (!state.host.take_state_request(operation, path)) return;
+    NesStateResult result{operation, false, "State operation failed"};
+    try {
+        if (!path.empty()) result = operation == NesStateOperation::save ? save_state(path, state.rom_fingerprint)
+                                                                       : load_state(path, state.rom_fingerprint);
+    } catch (const std::exception &error) {
+        std::fprintf(stderr, "fceumm: state operation failed: %s\n", error.what());
+    }
+    state.host.state_completed(std::move(result));
 }
 
 bool valid_rom_size(const std::array<std::uint8_t, 16> &header, std::uintmax_t file_size)
@@ -293,6 +451,8 @@ int run_session(const std::string &rom_path, const FceummHost &host)
 
     Session state(host);
     state.directory = std::filesystem::absolute(rom_path).parent_path().string();
+    state.save_directory = nes_paths::states_directory();
+    state.rom_fingerprint = fingerprint_rom(rom);
     session = &state;
     retro_set_environment(environment);
     retro_set_video_refresh(video_refresh);
@@ -315,24 +475,44 @@ int run_session(const std::string &rom_path, const FceummHost &host)
     std::fprintf(stderr, "fceumm: %ux%u RGB565, %.6f Hz, %d Hz audio\n",
                  av.geometry.base_width, av.geometry.base_height, av.timing.fps, host.sample_rate);
 
-    auto save_path = std::filesystem::path(rom_path);
-    save_path.replace_extension(".sav");
+    const auto save_path = std::filesystem::path(nes_paths::battery_path(rom_path));
     void *battery = retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
     const auto battery_size = retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
-    const bool save_enabled = battery && battery_size && load_battery(save_path, battery, battery_size);
+    const bool has_battery = battery && battery_size;
+    bool save_enabled = !save_path.empty() && has_battery;
+    if (save_enabled) {
+        std::filesystem::create_directories(save_path.parent_path(), error);
+        save_enabled = !error;
+        if (error) std::fprintf(stderr, "fceumm: cannot create save directory: %s\n", error.message().c_str());
+    }
+    const bool storage_failed = has_battery && !save_enabled;
+    if (storage_failed) std::fprintf(stderr, "fceumm: battery RAM cannot be saved because the states directory is unavailable\n");
+    if (save_enabled) {
+        auto load_path = save_path;
+        error.clear();
+        if (!std::filesystem::exists(save_path, error) && !error) {
+            // Import older adjacent SRAM only when the new save does not exist.
+            // The old file remains available for older app versions.
+            auto legacy_path = std::filesystem::path(rom_path);
+            legacy_path.replace_extension(".sav");
+            if (std::filesystem::exists(legacy_path, error) && !error) load_path = legacy_path;
+        }
+        save_enabled = load_battery(load_path, battery, battery_size);
+    }
     while (!host.stop_requested() && !state.shutdown && !state.failed) {
         const int elapsed = host.wait_frame();
         if (elapsed <= 0 || host.stop_requested()) break;
         const int frames = std::min(elapsed, 2);
         for (int index = 0; index < frames && !host.stop_requested() && !state.shutdown && !state.failed; ++index) {
+            process_state_request(state);
             state.publish = index == frames - 1;
             nes_performance::Scope timing(nes_performance::Stage::emulation);
             retro_run();
         }
     }
     if (state.failed) return -1;
-    if (save_enabled && !save_battery(save_path, battery, battery_size)) return -1;
-    return 0;
+    if (save_enabled && !atomic_write(save_path, battery, battery_size)) return -1;
+    return storage_failed ? -1 : 0;
 }
 
 }  // namespace

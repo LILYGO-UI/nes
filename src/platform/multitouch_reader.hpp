@@ -21,6 +21,9 @@ public:
     MultitouchReader(const MultitouchReader &)            = delete;
     MultitouchReader &operator=(const MultitouchReader &) = delete;
 
+    [[nodiscard]] static TouchPoint map_point(int raw_x, int raw_y, bool active,
+                                              int raw_max_x, int raw_max_y,
+                                              int display_width, int display_height) noexcept;
     bool start(int display_width, int display_height);
     void set_display_size(int display_width, int display_height) noexcept;
     void stop() noexcept;

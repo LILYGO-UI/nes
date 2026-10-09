@@ -13,6 +13,7 @@ function(lilygo_nes_enable_gles)
         TARGET_DIRECTORY lvgl PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-x;c++")
     set(_patches
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/lvgl-9.5.0-gles-compat.patch"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/lvgl-9.5.0-gles-display-rotation.patch"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/lvgl-9.5.0-drm-timing.patch")
     find_program(_patch_executable patch REQUIRED)
     foreach(_patch IN LISTS _patches)

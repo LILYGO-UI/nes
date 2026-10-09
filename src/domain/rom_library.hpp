@@ -1,6 +1,7 @@
 #ifndef LILYGO_UI_NES_DOMAIN_ROM_LIBRARY_HPP
 #define LILYGO_UI_NES_DOMAIN_ROM_LIBRARY_HPP
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <system_error>
@@ -18,6 +19,12 @@ struct RomInfo {
     bool valid_header      = false;
 };
 
+struct RomFileEntry {
+    std::string path;
+    std::string name;
+    bool directory = false;
+};
+
 class RomLibrary {
 public:
     static constexpr std::size_t maximum_roms = 128;
@@ -26,6 +33,7 @@ public:
     explicit RomLibrary(std::vector<std::string> search_paths);
 
     void scan();
+    bool import_rom(const std::string &source_path, std::error_code &error);
     bool delete_rom(std::size_t index, std::error_code &error);
 
     [[nodiscard]] const std::vector<RomInfo> &roms() const noexcept;
@@ -34,6 +42,8 @@ public:
 
     [[nodiscard]] static RomInfo inspect(const std::string &path);
     [[nodiscard]] static std::vector<std::string> default_search_paths();
+    [[nodiscard]] static std::vector<RomFileEntry> browse_directory(const std::string &path,
+                                                                   std::error_code &error);
 
 private:
     std::vector<std::string> search_paths_;

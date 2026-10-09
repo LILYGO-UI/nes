@@ -18,7 +18,7 @@ void app_open(const cm0_app_context_t *context)
 {
     app_state.view_model = std::make_unique<NesViewModel>();
     app_state.view       = std::make_unique<NesView>(*app_state.view_model);
-    app_state.view->create(context->root, LILYGO_UI_NES_APP_NAME);
+    app_state.view->create(context->root);
 }
 
 void app_close()

@@ -1,9 +1,9 @@
 #include "domain/rom_library.hpp"
+#include "domain/nes_paths.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -48,11 +48,6 @@ std::uint32_t crc32_file(const std::string &path)
     return ~crc;
 }
 
-void add_unique(std::vector<std::string> &paths, const std::string &path)
-{
-    if (!path.empty() && std::find(paths.cbegin(), paths.cend(), path) == paths.cend()) paths.push_back(path);
-}
-
 bool title_less(const std::string &left, const std::string &right)
 {
     return std::lexicographical_compare(left.cbegin(), left.cend(), right.cbegin(), right.cend(),
@@ -77,6 +72,7 @@ void RomLibrary::scan()
     std::error_code error;
 
     for (const auto &search_path : search_paths_) {
+        if (roms_.size() >= maximum_roms) break;
         const std::filesystem::path directory(search_path);
         if (!std::filesystem::is_directory(directory, error)) {
             error.clear();
@@ -85,19 +81,65 @@ void RomLibrary::scan()
 
         for (std::filesystem::directory_iterator iterator(directory, error), end; iterator != end && !error;
              iterator.increment(error)) {
-            if (roms_.size() >= maximum_roms) break;
-            if (!iterator->is_regular_file(error) || !has_nes_extension(iterator->path())) {
+            if (!has_nes_extension(iterator->path()) || !iterator->is_regular_file(error)) {
                 error.clear();
                 continue;
             }
             roms_.push_back(inspect(iterator->path().string()));
+            if (roms_.size() >= maximum_roms) break;
         }
         error.clear();
-        if (roms_.size() >= maximum_roms) break;
     }
 
     std::sort(roms_.begin(), roms_.end(),
               [](const RomInfo &left, const RomInfo &right) { return title_less(left.title, right.title); });
+}
+
+bool RomLibrary::import_rom(const std::string &source_path, std::error_code &error)
+{
+    error.clear();
+    const std::filesystem::path source(source_path);
+    const std::filesystem::path directory(primary_path());
+    if (directory.empty()) {
+        error = std::make_error_code(std::errc::no_such_file_or_directory);
+        return false;
+    }
+    if (!has_nes_extension(source)) {
+        error = std::make_error_code(std::errc::invalid_argument);
+        return false;
+    }
+    if (!std::filesystem::is_regular_file(source, error)) {
+        if (!error) error = std::make_error_code(std::errc::invalid_argument);
+        return false;
+    }
+    if (!inspect(source_path).valid_header) {
+        error = std::make_error_code(std::errc::illegal_byte_sequence);
+        return false;
+    }
+    std::filesystem::create_directories(directory, error);
+    if (error) return false;
+
+    const auto destination = directory / source.filename();
+    if (std::filesystem::exists(destination, error)) {
+        error = std::make_error_code(std::errc::file_exists);
+        return false;
+    }
+    if (error) return false;
+    const auto entries = browse_directory(directory.string(), error);
+    if (error) return false;
+    const auto rom_count = std::count_if(entries.begin(), entries.end(),
+                                         [](const RomFileEntry &entry) { return !entry.directory; });
+    if (rom_count >= static_cast<std::ptrdiff_t>(maximum_roms)) {
+        error = std::make_error_code(std::errc::value_too_large);
+        return false;
+    }
+    if (!std::filesystem::copy_file(source, destination, std::filesystem::copy_options::none, error)) {
+        if (!error) error = std::make_error_code(std::errc::io_error);
+        return false;
+    }
+
+    scan();
+    return true;
 }
 
 bool RomLibrary::delete_rom(std::size_t index, std::error_code &error)
@@ -181,13 +223,37 @@ RomInfo RomLibrary::inspect(const std::string &path)
 
 std::vector<std::string> RomLibrary::default_search_paths()
 {
-    std::vector<std::string> paths;
-    if (const char *override_path = std::getenv("NES_ROM_DIR")) add_unique(paths, override_path);
-    if (const char *home = std::getenv("HOME")) add_unique(paths, std::string(home) + "/nes");
-    add_unique(paths, "/root/nes");
-    add_unique(paths, "/root/roms/nes");
-    add_unique(paths, "/mnt/sdcard/nes");
-    add_unique(paths, "/mnt/nes");
-    add_unique(paths, "/media/nes");
-    return paths;
+    const auto directory = nes_paths::rom_directory();
+    return directory.empty() ? std::vector<std::string>{} : std::vector<std::string>{directory};
+}
+
+std::vector<RomFileEntry> RomLibrary::browse_directory(const std::string &path, std::error_code &error)
+{
+    error.clear();
+    const auto directory = std::filesystem::path(path).lexically_normal();
+    if (!directory.is_absolute()) {
+        error = std::make_error_code(std::errc::invalid_argument);
+        return {};
+    }
+
+    std::vector<RomFileEntry> entries;
+    for (std::filesystem::directory_iterator iterator(directory, error), end; iterator != end && !error;
+         iterator.increment(error)) {
+        const bool is_directory = iterator->is_directory(error);
+        if (error) {
+            error.clear();
+            continue;
+        }
+        if (!is_directory && (!has_nes_extension(iterator->path()) || !iterator->is_regular_file(error))) {
+            error.clear();
+            continue;
+        }
+        entries.push_back({iterator->path().string(), iterator->path().filename().string(), is_directory});
+    }
+    if (error) return {};
+    std::sort(entries.begin(), entries.end(), [](const RomFileEntry &left, const RomFileEntry &right) {
+        if (left.directory != right.directory) return left.directory;
+        return title_less(left.name, right.name);
+    });
+    return entries;
 }

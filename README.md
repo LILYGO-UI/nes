@@ -26,14 +26,22 @@ The preview shows the generated NROM test program.
 
 ## Features
 
-- **ROM library:** discover local ROMs, inspect iNES metadata, refresh the list,
-  and swipe a game card to delete its ROM file.
+- **ROM library:** browse and import local ROMs into `$HOME/nes/rom`, inspect iNES
+  metadata, refresh the list, and swipe a game card to delete its ROM file.
 - **Emulation:** FCEUmm CPU, PPU, APU, and mapper emulation runs in a dedicated
   thread, delivering native `256 x 240` RGB565 frames to LVGL.
+- **Save progress:** Save and Load on the game page provide one manual save state
+  per ROM. Save states and automatic battery saves are stored in `$HOME/nes/states`.
 - **Touch controls:** D-pad, A, B, Select, Start, and Stop, with direct Linux
   multitouch support for direction and action combinations.
-- **Responsive interface:** portrait and landscape layouts, with wrapping
-  game titles and proportionally scaled gameplay.
+- **P1 keyboard mapping:** W/S/A/D for directions, K/J for A/B, I/U for
+  rapid-fire A/B, and 1/2 for Start/Select. The library's Key Mapping page
+  lets you tap an action and press a replacement key; duplicate keys are
+  rejected and P2 is not supported.
+- **iOS-inspired interface:** a full-width, single-column library in both
+  orientations, rounded white surfaces, and blue actions. Add ROM is the last
+  item in the list and scrolls with it; a fixed bottom toolbar provides Refresh,
+  Settings, and Help. Game titles wrap and gameplay scales proportionally.
 - **Audio:** 48 kHz mono through SDL2 on the simulator and ALSA's `aplay` on the device.
 
 ROM compatibility depends on FCEUmm and the individual ROM. A recognized iNES
@@ -43,19 +51,47 @@ limits, data paths, and troubleshooting.
 
 ## Playing a Game
 
-1. Place `.nes` files directly in `$HOME/nes`, or set `NES_ROM_DIR` to a custom
-   directory before launching. On a device running as root, use `/root/nes`.
-2. Launch **NES** from LILYGO UI Launcher, or start the desktop simulator as
-   described below. Use the refresh button after changing the ROM files.
-3. Tap a game card to start, use the on-screen controls, and press Stop to return
-   to the library.
+1. Launch **NES** from LILYGO UI Launcher, or start the desktop simulator as
+   described below. The app creates `$HOME/nes/rom` if it is missing, at startup and
+   whenever the library is refreshed.
+2. Tap **Add ROM**, the last item in the ROM list, browse to a `.nes` file, and tap it to copy
+   it into `$HOME/nes/rom`. The directory is created when needed and the source file
+   is preserved. You can also place files there directly and press Refresh.
+3. Tap a game card to start, use the on-screen controls or the P1 keyboard
+   mapping, and press Stop to return to the library. Tap Settings in the bottom
+   toolbar, tap an action row, and press the desired key to
+   change its binding.
+4. Use **Save** beside Select/Start in the game page's control row to store the current moment and
+   **Load** to restore it. Saving again replaces that game's previous save state;
+   the status strip shows completion or an error.
+
+Tap Help in the bottom toolbar for the actual, expanded ROM and save directory paths,
+import and refresh instructions, swipe-to-delete behavior, key mappings, and
+game controls. Help scrolls independently and provides Back to return to the
+library. The library presents the game list without a summary panel or ROM counts.
+When no ROMs are available, the list contains only **Add ROM**.
+The main page has no status line. Errors appear immediately in an alert that
+closes automatically after five seconds.
 
 Swipe a card left to reveal Delete; tapping it immediately removes the ROM
 file from disk without a confirmation dialog. Swipe right to close the action.
+Save states and battery saves are kept when a ROM is deleted.
 
-`NES_ROM_DIR` adds a preferred location; the application still scans its other
-default directories. Scanning is non-recursive and limited to 128 entries.
-See the [runtime guide](docs/02-roms-and-runtime.md) for the full search order.
+The library uses only the launching user's `$HOME/nes/rom` (`/root/nes/rom` when
+`HOME=/root`). Scanning is non-recursive and limited to 128 entries. Import
+rejects invalid iNES headers and existing filenames without overwriting files,
+and reports a full library when `$HOME/nes/rom` already contains 128 `.nes` files.
+`HOME` must be a nonempty absolute path; no alternate directory is used.
+ROMs in older locations, including `$HOME/nes`, are not moved automatically;
+use **Add ROM** to import them or move them into `$HOME/nes/rom` and refresh.
+For `game.nes`, the manual save is `$HOME/nes/states/game.nes.state` and the battery
+save is `$HOME/nes/states/game.nes.sav`. Import copies only the ROM.
+See the [runtime guide](docs/02-roms-and-runtime.md) for import and save-file details.
+
+Key mappings are saved as numeric key codes in
+`$XDG_CONFIG_HOME/lilygo-ui-nes/keymap.conf`, or
+`$HOME/.config/lilygo-ui-nes/keymap.conf` when `XDG_CONFIG_HOME` is unset.
+The file is loaded at startup; deleting it restores the defaults.
 
 ## Development Environment
 
@@ -179,10 +215,10 @@ lpm start --foreground
 ```
 
 This configures and builds the simulator, then starts it in the foreground.
-To reuse an existing build with a custom ROM directory:
+To reuse an existing build:
 
 ```sh
-NES_ROM_DIR="$HOME/nes" lpm start --no-build --foreground
+lpm start --no-build --foreground
 ```
 
 The Debug build has tests enabled and is stored in `build/host-simulator`.
@@ -200,16 +236,18 @@ lpm test
 
 | Test | Coverage |
 | --- | --- |
-| `nes-core` | ROM scanning, iNES metadata, CRC32, sorting, and file deletion |
+| `nes-core` | ROM scanning, import validation, iNES metadata, CRC32, sorting, and file deletion |
 | `nes-audio` | SDL audio lifecycle, sample timing, unavailable output, and recorded PCM |
-| `nes-view-model` | Library state, Subject updates, invalid ROMs, and deletion guards |
+| `nes-view-model` | Library state, invalid ROMs, import, and runtime mutation guards |
 | `nes-render-portrait` | Rendering and library/game interactions at `568 x 1232` |
 | `nes-render-landscape` | Rendering and library/game interactions at `1232 x 568` |
 
 Render tests generate a minimal NROM program, start and stop the emulator, and
-exercise combined button input, long titles, scrolling, and swipe-to-delete.
-They write `nes-portrait.ppm`, `nes-landscape.ppm`, and matching `-library.ppm`
-and `-delete.ppm` screenshots under `build/host-simulator`. Audio tests use
+exercise file browsing and import, combined button input, long titles, scrolling,
+swipe-to-delete, the fixed toolbar, and the Help and Settings pages.
+They write `nes-portrait.ppm`, `nes-landscape.ppm`, and matching `-library.ppm`, `-library-end.ppm`,
+`-browser.ppm`, `-delete.ppm`, `-help.ppm`, `-settings.ppm`, `-error.ppm`, and `-empty.ppm`
+screenshots under `build/host-simulator` (eighteen images in total). Audio tests use
 virtual outputs; render tests use SDL's dummy audio driver, so speakers are
 not required.
 

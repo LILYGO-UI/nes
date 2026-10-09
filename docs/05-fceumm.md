@@ -85,7 +85,7 @@ and licenses are recorded in [FCEUmm Origin](../third_party/FCEUMM_ORIGIN.md).
 The application scans only uncompressed `.nes` files, and its library metadata parser uses classic
 iNES fields. NES 2.0 extended metadata may therefore appear incomplete in the
 library even when FCEUmm can load the game. This integration provides no FDS
-disk/BIOS workflow or save-state controls.
+disk/BIOS workflow.
 
 Classic iNES PAL detection primarily follows upstream filename tags such as
 `(E)`, `(Europe)` and `(PAL)`, not the iNES byte 9 flag alone. NES 2.0 uses its
@@ -100,13 +100,27 @@ using the games intended for the board. Compatibility depends on each ROM and
 the upstream implementation. Emulation does not increase the physical panel
 refresh rate or resolve unstable panel timing.
 
-Battery saves use raw `.sav` files beside the ROM. FCEUmm uses the save-memory
+ROMs are loaded from `$HOME/nes/rom`; all saves use `$HOME/nes/states` and the
+complete ROM filename. For `game.nes`, the files are `game.nes.state` for a manual
+state and `game.nes.sav` for battery RAM.
+
+The game page's **Save** and **Load** buttons use FCEUmm's `retro_serialize()` and
+`retro_unserialize()` on the emulation thread between frames. Each ROM has one
+manual state, replaced by Save and restored explicitly by Load. State files
+include format, ROM identity and integrity checks; writes use a temporary file
+and atomic rename. The UI reports the operation result and disables both buttons
+while a request is pending. Ordinary failures leave the game running.
+
+Battery saves use raw `.sav` files. FCEUmm uses the save-memory
 size reported by the loaded core, which is not always 8 KiB. It loads saves
 before emulation and writes a temporary file followed by an atomic rename on a clean stop. Missing
 saves are created. An existing unreadable or wrongly sized save is preserved
 without replacement and a warning is logged. Back up important saves before
 upgrading; matching sizes alone do not establish save compatibility with older
 packages.
+The ROM importer copies only ROM files, and deleting a ROM preserves both save
+files. See [ROMs and Runtime](02-roms-and-runtime.md#battery-ram-and-save-states)
+for migrating saves from the old directory layout.
 
 ## Validation
 

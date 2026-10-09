@@ -25,34 +25,47 @@ FCEUmm 是唯一支持的核心，GLES 设备包使用 `cm0-cross-gles` 预设�
 
 - **本地游戏库：** 扫描 `.nes` 文件，显示名称、Mapper、PRG/CHR 容量、电视制式、镜像方式和文件大小。
 - **NES 模拟：** 使用 FCEUmm 核心，以 RGB565 格式显示原生 `256 x 240` 游戏画面。
+- **保存进度：** 游戏页提供 Save / Load 即时存档与读取，每个 ROM 保留一份手动即时存档；即时存档和自动电池存档统一保存在 `$HOME/nes/states`。
 - **触屏控制：** 提供方向键、A、B、Select、Start 和停止按钮；Linux 设备支持直接读取多点触控，实现方向与动作组合。
-- **横竖屏布局：** 根据可用空间调整游戏画面和控件布局。
+- **P1 键盘映射：** W/S/A/D 控制方向，K/J 控制 A/B，I/U 触发 A/B 连发，1/2 控制开始/选择；在 ROM 库设置页点击动作行后按下新键即可修改，重复按键会被拒绝，暂不支持 P2。
+- **iOS 风格界面：** 浅灰底色、白色圆角容器与蓝色操作；横竖屏均采用全宽单列 ROM 列表，Add ROM 位于列表最后一项并随列表滚动，列表下方固定工具栏提供刷新、设置和帮助，游戏画面和控件按可用空间调整。
 - **游戏音频：** 桌面模拟器通过 SDL2、Linux 设备通过 `aplay` 输出 48 kHz 单声道音频。
-- **游戏库管理：** 手动刷新目录，通过左滑显示的删除按钮移除 ROM 文件。
+- **游戏库管理：** 浏览文件系统并将 ROM 导入 `$HOME/nes/rom`，手动刷新目录，通过左滑显示的删除按钮移除 ROM 文件。
 
 ROM 头部校验通过并不代表游戏一定兼容；支持情况取决于 FCEUmm 和具体 ROM。
-当前界面没有即时存档、暂停、键盘映射或手柄配置。格式、兼容性和电池存档说明见
+游戏运行时支持 P1 键盘映射：W/S/A/D 控制方向，K/J 控制 A/B，I/U 分别触发 A/B 连发，1/2 控制开始/选择。P2 键盘映射暂不支持。格式、兼容性和存档说明见
 [ROM 与运行指南](docs/02-roms-and-runtime.md)（英文）。
 
 ## 开始游戏
 
-1. 将未压缩的 `.nes` 文件放入运行应用的用户的 `$HOME/nes` 目录；以 root 运行时可使用 `/root/nes`。
-2. 启动应用。如果启动后才复制文件，点击游戏库的刷新按钮。
+1. 启动应用，点击 ROM 列表最后一项 **Add ROM**，浏览并选择未压缩的 `.nes` 文件；点击底部工具栏中的设置按钮进入 P1 按键映射设置，点击动作行后按下新键即可修改。
+2. 应用在启动和刷新游戏库时自动创建缺失的 `$HOME/nes/rom` 目录；导入将文件复制到该目录并保留源文件，随后自动刷新游戏库。
+   也可以直接将文件放入该目录后点击刷新；`HOME=/root` 时目录为 `/root/nes/rom`。
 3. 点击游戏条目启动，使用屏幕上的方向键、A、B、Select 和 Start 操作。
-4. 点击停止按钮（Stop）关闭当前游戏并返回游戏库。
+4. 点击游戏页与 Select / Start 同一行的 **Save** 保存当前进度，点击 **Load** 恢复；再次保存会覆盖该游戏的上一份即时存档。顶部状态条会显示完成或失败结果，处理过程中 Save / Load 暂不可用。
+5. 点击停止按钮（Stop）关闭当前游戏并返回游戏库；支持电池存档的游戏会自动写出电池 RAM。
 
-自定义主机 ROM 目录：
+点击底部工具栏中的帮助按钮，可查看当前用户实际的完整 ROM 和存档目录路径、导入和手动复制后刷新、
+点击启动、左滑删除、按键映射与游戏控制说明。帮助内容可独立滚动，点击 Back 返回游戏库。
+游戏库主体直接显示列表，不显示摘要面板或 ROM 数量；无 ROM 时列表中仅保留 **Add ROM**。
+主页面不显示状态信息；发生错误时立即弹窗显示原因，5 秒后自动关闭。
 
-```sh
-NES_ROM_DIR="$HOME/roms/nes" lpm start --foreground
-```
+游戏库只使用 `$HOME/nes/rom`，扫描不递归进入子目录，最多收录 128 个文件。
+`HOME` 必须是非空绝对路径，未设置或不合法时提示错误，不回退到其他目录。
+导入时校验 iNES 头，不覆盖同名文件；目录已有 128 个 `.nes` 文件时拒绝导入并提示游戏库已满。
+导入失败时保留文件选择器，并通过错误弹窗提示。
+包括 `$HOME/nes` 在内的旧目录中的 ROM 不会自动迁移，可通过 **Add ROM** 导入，或手动移入
+`$HOME/nes/rom` 后刷新；导入只复制 ROM，不会一并导入存档。
+例如 `game.nes` 的即时存档为 `$HOME/nes/states/game.nes.state`，电池存档为
+`$HOME/nes/states/game.nes.sav`。旧版的 `$HOME/nes/game.sav` 可在停止游戏后复制为上述电池存档文件。
+目录、导入和存档说明见 [ROM 与运行指南](docs/02-roms-and-runtime.md)（英文）。
 
-`NES_ROM_DIR` 将指定目录加入搜索列表首位，其余默认目录仍会扫描。
-扫描不递归进入子目录，所有位置合计最多收录 128 个文件。完整目录列表见
-[ROM 搜索路径](docs/02-roms-and-runtime.md#rom-search-paths)（英文）。
+按键映射会保存到 `$XDG_CONFIG_HOME/lilygo-ui-nes/keymap.conf`；未设置
+`XDG_CONFIG_HOME` 时使用 `$HOME/.config/lilygo-ui-nes/keymap.conf`。应用启动时读取该文件，
+删除文件即可恢复默认映射。
 
 左滑游戏条目可显示删除按钮，右滑可收起。**点击删除会立即从磁盘移除实际 ROM 文件，
-没有确认对话框，也不会移入回收站。** 对应的 `.sav` 文件会保留。
+没有确认对话框，也不会移入回收站。** `$HOME/nes/states` 中对应的 `.sav` 和 `.state` 文件会保留。
 
 ## 开发环境搭建
 
@@ -184,21 +197,27 @@ lpm test
 
 | 测试 | 覆盖内容 |
 | --- | --- |
-| `nes-core` | 目录扫描、iNES 元数据、CRC32、排序和 ROM 删除 |
+| `nes-core` | 目录扫描、导入校验、iNES 元数据、CRC32、排序和 ROM 删除 |
 | `nes-audio` | SDL 音频生命周期、样本时序、不可用输出设备和 PCM 录制 |
-| `nes-view-model` | 游戏库状态、Subject 更新、无效 ROM 和删除保护 |
+| `nes-view-model` | 游戏库状态、无效 ROM、导入和运行时文件操作保护 |
 | `nes-render-portrait` | `568 x 1232` 下的模拟器、触控组合、游戏库和删除交互 |
 | `nes-render-landscape` | `1232 x 568` 下的模拟器、触控组合、游戏库和删除交互 |
 
-渲染测试会自行生成最小 NROM 程序并启动模拟器，无需商业游戏 ROM。
+渲染测试会自行生成最小 NROM 程序并启动模拟器，覆盖文件浏览和导入、固定工具栏、帮助页和设置页，无需商业游戏 ROM。
 音频和渲染测试使用虚拟音频后端，无需扬声器。
 截图输出到 `build/host-simulator`：
 
 - `nes-portrait.ppm`、`nes-landscape.ppm`：运行中的游戏画面；
 - `nes-portrait-library.ppm`、`nes-landscape-library.ppm`：游戏库；
-- `nes-portrait-delete.ppm`、`nes-landscape-delete.ppm`：左滑删除操作。
+- `nes-portrait-library-end.ppm`、`nes-landscape-library-end.ppm`：ROM 列表末尾的 Add ROM；
+- `nes-portrait-browser.ppm`、`nes-landscape-browser.ppm`：ROM 文件选择器；
+- `nes-portrait-delete.ppm`、`nes-landscape-delete.ppm`：左滑删除操作；
+- `nes-portrait-help.ppm`、`nes-landscape-help.ppm`：帮助页；
+- `nes-portrait-settings.ppm`、`nes-landscape-settings.ppm`：按键映射设置；
+- `nes-portrait-error.ppm`、`nes-landscape-error.ppm`：错误弹窗；
+- `nes-portrait-empty.ppm`、`nes-landscape-empty.ppm`：空游戏库。
 
-修改 UI 后应检查横竖屏渲染产物；断言通过并不能验证视觉布局。
+修改 UI 后应检查横竖屏的十八张渲染产物；断言通过并不能验证视觉布局。
 UI 验收要求见 [UI 开发规范](docs/01-user-interface.md)。
 
 ### CM0 设备构建
@@ -238,7 +257,7 @@ sudo apt install --reinstall ./lilygo-ui-nes_0.1.0_arm64-gles.deb
 ```
 
 文件名随版本变化，请使用 `dist/` 中实际生成的名称。
-将 ROM 放入启动用户的 `$HOME/nes`（以 root 运行时为 `/root/nes`），
+将 ROM 放入启动用户的 `$HOME/nes/rom`（以 root 运行时为 `/root/nes/rom`），
 然后从 LILYGO UI Launcher 启动 `NES`。设备使用 48 kHz 音频输出；
 格式、编解码器时钟与排障步骤见[音频说明](docs/02-roms-and-runtime.md#audio)（英文）。
 

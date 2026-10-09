@@ -1,5 +1,6 @@
 #include "emulator/fceumm_core.hpp"
 #include "emulator/nes_emulator.hpp"
+#include "domain/nes_paths.hpp"
 
 #include <algorithm>
 #include <array>
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -108,6 +110,7 @@ struct Session {
     std::vector<int> ticks;
     std::size_t tick = 0;
     std::uint32_t buttons = 0;
+    std::vector<std::uint16_t> colors;
 
     FceummHost host(int rate = 48000)
     {
@@ -123,6 +126,7 @@ struct Session {
         output.publish_frame = [this](const std::uint16_t *pixels, std::size_t count) {
             assert(pixels && count == NesEmulator::frame_pixels);
             last_color = pixels[count / 2];
+            colors.push_back(last_color);
             ++frames;
         };
         output.submit_audio = [this](const std::int16_t *pcm, std::size_t count) {
@@ -156,9 +160,7 @@ void test_timing_audio_and_rom_formats(const std::filesystem::path &directory)
                 // The core's first audio frame may be shorter than steady state.
                 assert(std::abs(static_cast<double>(session.samples) - expected_samples) < sample_rate * 0.05);
                 assert(session.last_color != 0);
-                auto save = path;
-                save.replace_extension(".sav");
-                assert(!std::filesystem::exists(save));
+                assert(!std::filesystem::exists(nes_paths::battery_path(path.string())));
             }
         }
     }
@@ -245,7 +247,8 @@ void test_extended_mapper(const std::filesystem::path &directory)
 void test_input_and_battery(const std::filesystem::path &directory)
 {
     const auto path = directory / "input.nes";
-    const auto save = directory / "input.sav";
+    const auto save = std::filesystem::path(nes_paths::battery_path(path.string()));
+    std::filesystem::create_directories(save.parent_path());
     constexpr std::array<unsigned, 8> serial_bits{4, 5, 6, 7, 2, 3, 0, 1};
     for (const bool nes2 : {false, true}) {
         write_bytes(path, make_rom(true, false, nes2));
@@ -284,8 +287,181 @@ void test_input_and_battery(const std::filesystem::path &directory)
         assert(run_fceumm(path.string(), invalid.host()) == 0);
         assert(read_bytes(save) == original);
     }
-    for (const auto &entry : std::filesystem::directory_iterator(directory)) {
+    // Existing adjacent SRAM is imported once; subsequent runs use states/.
+    std::filesystem::remove(save);
+    auto legacy = path;
+    legacy.replace_extension(".sav");
+    std::vector<std::uint8_t> original(8192, 0);
+    original[8] = 17;
+    write_bytes(legacy, original);
+    Session migrated;
+    migrated.ticks = {1, 1};
+    assert(run_fceumm(path.string(), migrated.host()) == 0);
+    assert(read_bytes(save)[8] == 18);
+    assert(read_bytes(legacy) == original);
+    Session newer;
+    newer.ticks = {1, 1};
+    assert(run_fceumm(path.string(), newer.host()) == 0);
+    assert(read_bytes(save)[8] == 19);
+    assert(read_bytes(legacy) == original);
+
+    const auto normal_home = std::string(std::getenv("HOME"));
+    const auto blocked_home = directory / "blocked-home";
+    write_bytes(blocked_home, {0x5a});
+    assert(setenv("HOME", blocked_home.c_str(), 1) == 0);
+    Session unavailable;
+    unavailable.ticks = {1, 1};
+    assert(run_fceumm(path.string(), unavailable.host()) != 0);
+    assert(unavailable.frames == 2); // Gameplay remains available until exit.
+    assert(setenv("HOME", normal_home.c_str(), 1) == 0);
+    assert(read_bytes(save)[8] == 19 && read_bytes(legacy) == original);
+    for (const auto &entry : std::filesystem::directory_iterator(nes_paths::states_directory())) {
         assert(entry.path().string().find(".tmp.") == std::string::npos);
+    }
+}
+
+struct StateAction {
+    int after_frames;
+    NesStateOperation operation;
+    std::filesystem::path path;
+};
+
+std::vector<NesStateResult> run_actions(const std::filesystem::path &rom, Session &session,
+                                      const std::vector<StateAction> &actions)
+{
+    auto host = session.host();
+    std::size_t next = 0;
+    std::vector<NesStateResult> results;
+    host.take_state_request = [&](NesStateOperation &operation, std::string &path) {
+        if (next == actions.size() || session.frames != actions[next].after_frames) return false;
+        assert(next == results.size());
+        operation = actions[next].operation;
+        path = actions[next++].path.string();
+        return true;
+    };
+    host.state_completed = [&](NesStateResult result) {
+        assert(next == results.size() + 1);
+        assert(result.operation == actions[results.size()].operation);
+        assert(!result.message.empty());
+        results.push_back(std::move(result));
+    };
+    assert(run_fceumm(rom.string(), host) == 0);
+    assert(results.size() == actions.size());
+    assert(session.frames == static_cast<int>(session.ticks.size()));
+    return results;
+}
+
+void test_save_load_state(const std::filesystem::path &directory)
+{
+    const auto rom = directory / "checkpoint.nes";
+    write_bytes(rom, make_animated_rom());
+    const auto state = std::filesystem::path(nes_paths::state_path(rom.string()));
+    Session session;
+    session.ticks.assign(31, 1);
+    const auto results = run_actions(rom, session, {{8, NesStateOperation::save, state},
+                                                  {19, NesStateOperation::load, state}});
+    assert(results[0].success && results[1].success);
+    assert(std::filesystem::file_size(state) > 1024);
+    // The checkpoint includes CPU/PPU/RAM execution state. Running another
+    // eleven frames then loading it must replay the same animated sequence.
+    assert(std::set<std::uint16_t>(session.colors.begin() + 8, session.colors.begin() + 19).size() >= 7);
+    assert(std::equal(session.colors.begin() + 8, session.colors.begin() + 19, session.colors.begin() + 19));
+
+    Session restarted;
+    restarted.ticks.assign(15, 1);
+    const auto loaded = run_actions(rom, restarted, {{3, NesStateOperation::load, state}});
+    assert(loaded[0].success);
+    assert(std::equal(session.colors.begin() + 8, session.colors.begin() + 19, restarted.colors.begin() + 3));
+
+    // A second successful save replaces the previous checkpoint completely.
+    const auto original = read_bytes(state);
+    Session overwritten;
+    overwritten.ticks.assign(13, 1);
+    assert(run_actions(rom, overwritten, {{12, NesStateOperation::save, state}})[0].success);
+    assert(read_bytes(state) != original);
+    Session reloaded;
+    reloaded.ticks.assign(4, 1);
+    assert(run_actions(rom, reloaded, {{3, NesStateOperation::load, state}})[0].success);
+    assert(reloaded.colors.back() == overwritten.colors.back());
+}
+
+void test_invalid_states_keep_running(const std::filesystem::path &directory)
+{
+    const auto rom = directory / "invalid-state.nes";
+    write_bytes(rom, make_animated_rom());
+    const auto state = std::filesystem::path(nes_paths::state_path(rom.string()));
+    Session reference;
+    reference.ticks.assign(24, 1);
+    assert(run_actions(rom, reference, {{8, NesStateOperation::save, state}})[0].success);
+    const auto good = read_bytes(state);
+    const auto assert_rejected = [&](const std::filesystem::path &path) {
+        Session rejected;
+        rejected.ticks.assign(24, 1);
+        const auto results = run_actions(rom, rejected, {{12, NesStateOperation::load, path}});
+        assert(!results[0].success);
+        assert(rejected.colors == reference.colors);
+    };
+    assert_rejected(state.parent_path() / "missing.state");
+    assert_rejected(state.parent_path());
+    const auto invalid = state.parent_path() / "corrupt.state";
+    for (const std::size_t size : {std::size_t{0}, std::size_t{31}, good.size() - 1}) {
+        write_bytes(invalid, {good.begin(), good.begin() + size});
+        assert_rejected(invalid);
+    }
+    auto corrupt = good;
+    corrupt.back() ^= 0x80;
+    write_bytes(invalid, corrupt);
+    assert_rejected(invalid);
+    corrupt = good;
+    corrupt[8] = 2; // Unsupported wrapper format version.
+    write_bytes(invalid, corrupt);
+    assert_rejected(invalid);
+    corrupt = good;
+    corrupt.push_back(0);
+    write_bytes(invalid, corrupt);
+    assert_rejected(invalid);
+
+    // The filename alone cannot identify a game: replacement ROM content
+    // with the same filename must not accept an older ROM's checkpoint.
+    auto changed_rom = make_animated_rom();
+    changed_rom.back() ^= 0x80;
+    write_bytes(rom, changed_rom);
+    assert_rejected(state);
+    assert(read_bytes(state) == good);
+
+    // Failure to replace a target leaves its existing contents untouched and
+    // cleans up the temporary file. The next state operation still succeeds.
+    const auto blocked = state.parent_path() / "blocked.state";
+    std::filesystem::create_directories(blocked);
+    write_bytes(blocked / "existing.state", good);
+    Session failed_save;
+    failed_save.ticks.assign(24, 1);
+    const auto results = run_actions(rom, failed_save, {{8, NesStateOperation::save, blocked},
+                                                      {12, NesStateOperation::save, invalid}});
+    assert(!results[0].success && results[1].success);
+    assert(failed_save.colors == reference.colors);
+    assert(read_bytes(blocked / "existing.state") == good);
+
+    // Removing directory write permission forces temporary-file creation to
+    // fail while a valid checkpoint already exists. Do not run this assertion
+    // as root, whose filesystem access deliberately bypasses the permissions.
+    if (geteuid() != 0) {
+        const auto read_only = state.parent_path() / "read-only";
+        std::filesystem::create_directories(read_only);
+        const auto preserved = read_only / "existing.state";
+        write_bytes(preserved, good);
+        std::filesystem::permissions(read_only, std::filesystem::perms::owner_read |
+                                                   std::filesystem::perms::owner_exec);
+        Session denied;
+        denied.ticks.assign(24, 1);
+        const auto failure = run_actions(rom, denied, {{8, NesStateOperation::save, preserved}});
+        std::filesystem::permissions(read_only, std::filesystem::perms::owner_all);
+        assert(!failure[0].success);
+        assert(read_bytes(preserved) == good);
+        assert(denied.colors == reference.colors);
+    }
+    for (const auto &entry : std::filesystem::directory_iterator(state.parent_path())) {
+        assert(entry.path().filename().string().find(".nes.tmp.") != 0);
     }
 }
 
@@ -360,11 +536,16 @@ int main()
     const auto directory = std::filesystem::temp_directory_path() /
                            ("lilygo-ui-nes-fceumm-" + std::to_string(static_cast<long long>(getpid())));
     std::filesystem::create_directories(directory);
+    const auto isolated_home = directory / "home";
+    std::filesystem::create_directories(isolated_home);
+    assert(setenv("HOME", isolated_home.c_str(), 1) == 0);
     test_timing_audio_and_rom_formats(directory);
     test_long_audio_clock(directory);
     test_animation_and_catchup(directory);
     test_extended_mapper(directory);
     test_input_and_battery(directory);
+    test_save_load_state(directory);
+    test_invalid_states_keep_running(directory);
     test_invalid_roms_stop_and_restart(directory);
     std::filesystem::remove_all(directory);
     return 0;

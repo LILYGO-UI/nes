@@ -222,6 +222,53 @@ void check_texture_settings(unsigned int texture)
     glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previous));
 }
 
+void exercise_display_rotation(const std::filesystem::path &output)
+{
+    constexpr int native_width = 96;
+    constexpr int native_height = 160;
+    constexpr std::array<std::uint32_t, 4> colors{0xff0000, 0x00ff00, 0x0000ff, 0xffffff};
+    // Physical scanout corners (TL, TR, BL, BR), matching LVGL's software
+    // rotation and its inverse input transform used by the Launcher.
+    constexpr int expected[][4] = {{0, 1, 2, 3}, {1, 3, 0, 2}, {3, 2, 1, 0}, {2, 0, 3, 1}};
+    auto *display = lv_opengles_texture_create(native_width, native_height);
+    require(display, "Could not create the rotation test display");
+    lv_display_set_default(display);
+#if LV_USE_PERF_MONITOR
+    lv_sysmon_hide_performance(display);
+#endif
+#if LV_USE_MEM_MONITOR
+    lv_sysmon_hide_memory(display);
+#endif
+    for (int angle = 0; angle < 4; ++angle) {
+        lv_display_set_rotation(display, static_cast<lv_display_rotation_t>(angle));
+        auto *screen = lv_display_get_screen_active(display);
+        lv_obj_clean(screen);
+        lv_obj_remove_style_all(screen);
+        lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+        const int width = lv_display_get_horizontal_resolution(display);
+        const int height = lv_display_get_vertical_resolution(display);
+        for (int corner = 0; corner < 4; ++corner) {
+            auto *block = lv_obj_create(screen);
+            lv_obj_remove_style_all(block);
+            lv_obj_set_pos(block, (corner % 2) * width / 2, (corner / 2) * height / 2);
+            lv_obj_set_size(block, width / 2, height / 2);
+            lv_obj_set_style_bg_color(block, lv_color_hex(colors[corner]), 0);
+            lv_obj_set_style_bg_opa(block, LV_OPA_COVER, 0);
+        }
+        const auto pixels = present(display, native_width, native_height);
+        for (int corner = 0; corner < 4; ++corner) {
+            expect_color(pixels, native_width, native_height,
+                         corner % 2 ? native_width - 2 : 1,
+                         corner / 2 ? native_height - 2 : 1,
+                         colors[expected[angle][corner]]);
+        }
+        write_ppm(output / ("rotation-" + std::to_string(angle * 90) + ".ppm"),
+                  pixels, native_width, native_height);
+    }
+    lv_display_delete(display);
+    std::printf("Display scanout rotations 0/90/180/270 match Launcher orientation\n");
+}
+
 void exercise_frame(int width, int height, const std::filesystem::path &output, int iteration)
 {
     auto *display = lv_opengles_texture_create(width, height);
@@ -358,10 +405,10 @@ void exercise_page(int width, int height, const std::filesystem::path &output)
     const auto directory = std::filesystem::temp_directory_path() /
                            ("lilygo-nes-gpu-page-" + std::to_string(static_cast<long long>(getpid())) + "-" +
                             std::to_string(width));
-    std::filesystem::create_directories(directory);
-    const auto rom = directory / "Animated GPU Test.nes";
+    std::filesystem::create_directories(directory / "nes" / "rom");
+    const auto rom = directory / "nes" / "rom" / "Animated GPU Test.nes";
     write_animated_rom(rom);
-    require(setenv("NES_ROM_DIR", directory.c_str(), 1) == 0, "Could not isolate the test ROM directory");
+    require(setenv("HOME", directory.c_str(), 1) == 0, "Could not isolate the test ROM directory");
     require(setenv("SDL_AUDIODRIVER", "dummy", 1) == 0, "Could not select dummy audio for the GPU test");
 
     auto *display = lv_opengles_texture_create(width, height);
@@ -370,9 +417,9 @@ void exercise_page(int width, int height, const std::filesystem::path &output)
     auto *screen = lv_display_get_screen_active(display);
     const auto prefix = std::to_string(width) + "x" + std::to_string(height) + "-view";
     {
-        NesViewModel model(std::vector<std::string>{directory.string()});
+        NesViewModel model;
         NesView view(model);
-        view.create(screen, "NES");
+        view.create(screen);
         try {
             lv_obj_update_layout(screen);
             auto *row = lv_obj_find_by_name(screen, "nes_rom_row");
@@ -459,6 +506,7 @@ int main()
         const std::filesystem::path output = output_environment ? output_environment : "gpu-frame-output";
         std::filesystem::create_directories(output);
         lv_init();
+        exercise_display_rotation(output);
         for (int iteration = 0; iteration < 3; ++iteration) {
             exercise_frame(480, 800, output, iteration);
             exercise_frame(800, 480, output, iteration);
