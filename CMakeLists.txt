@@ -19,6 +19,8 @@ if(LILYGO_NES_GLES)
         lilygo_prepare_graphics_dependencies(HEADERS_ONLY)
     endif()
 endif()
+# Match the 50 Hz panel in LVGL, the statically linked SDK, and this application.
+add_compile_definitions(LV_DEF_REFR_PERIOD=20)
 find_package(LilyGoUI CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 if(LILYGO_NES_LVGL_MONITOR)
